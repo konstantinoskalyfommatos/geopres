@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any
 import pandas as pd
 
-from config import STORAGE_PATH
+from geopres.config import STORAGE_PATH
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BASE = Path(STORAGE_PATH / "evaluation_results")
+BASE = Path(STORAGE_PATH) / "evaluation_results"
 TASK = "AmazonReviewsClassification.json"
 
 # ---------------------------------------------------------------------------
@@ -215,12 +215,20 @@ def analyse_retention(df: pd.DataFrame) -> None:
 
 def main() -> None:
     df = collect_data()
+    if df.empty:
+        print(
+            "No reduced-model results found under "
+            f"{BASE / 'trained_models'}. Run the MTEB evaluation first.",
+            file=sys.stderr,
+        )
+        return
+
     print(f"Collected {len(df)} data points across {df['backbone'].nunique()} backbones, "
           f"{df['dim'].nunique()} dimensionalities, {df['language'].nunique()} languages.\n")
 
     analyse_retention(df)
 
-    output_dir = Path(STORAGE_PATH / "evaluation_results")
+    output_dir = Path(STORAGE_PATH) / "evaluation_results"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save raw data for downstream use

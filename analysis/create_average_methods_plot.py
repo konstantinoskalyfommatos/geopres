@@ -2,8 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-import glob
-from config import EVALUATION_RESULTS_PATH, STORAGE_PATH
+from geopres.config import EVALUATION_RESULTS_PATH, STORAGE_PATH
 
 
 def extract_embedding_dim(model_name):
