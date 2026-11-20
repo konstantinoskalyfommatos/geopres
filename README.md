@@ -44,7 +44,7 @@ your CUDA toolchain; see [Common issues](#common-issues).
 
 ## Quick start (library)
 
-Fitting a dimensional reduced embedding model:
+Fitting a dimension-reduced embedding model:
 
 ```python
 from geopres import GeoPres
