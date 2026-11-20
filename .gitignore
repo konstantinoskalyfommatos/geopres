@@ -1,18 +1,30 @@
-.env
+# Python
 .venv/
 **/__pycache__/
-nohup.out
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Local secrets / config (no longer read by the code, but keep them out of git)
+.env
+
+# Experiment artefacts
 storage/optuna_results/
 storage/precalculated_embeddings/
 storage/evaluation_results/
-storage/trained_autoencoders/
 storage/evaluation_results_trained_models_bad_checkpoints/
+storage/trained_autoencoders/
 storage/trained_models/
-storage/plots/
 storage/pca/
+storage/plots/
 storage/available_tasks.txt
-trainer_output
-notes.md
+trainer_output/
+nohup.out
 optuna_study.db
+
+# Scratch
+notes.md
 scratch/
-.vscode
+.vscode/
