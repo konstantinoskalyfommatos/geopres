@@ -5,7 +5,7 @@ that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
 embedding model stays frozen, and at inference time the whole "reduction" is one
 matrix multiply. The method is described in our [**EACL paper: "On Post-Hoc Dimensionality Reduction of Text Embeddings"**](https://openreview.net/forum?id=vAWo3CIzqp).
 
-This repository contains two things:
+This repository contains features two parts:
 
 1. **`geopres`, a small library** — train a projection on your own embeddings,
    save it, reload it, and use it on new text (no GPU required).
