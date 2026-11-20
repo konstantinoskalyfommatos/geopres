@@ -1,7 +1,5 @@
 # GeoPres
 
-Official code for **"On Post-Hoc Dimensionality Reduction of Text Embeddings"**.
-
 GeoPres compresses high-dimensional text embeddings with a **single linear map**
 that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
 embedding model stays frozen, and at inference time the whole "reduction" is one
