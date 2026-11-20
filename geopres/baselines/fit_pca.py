@@ -7,8 +7,8 @@ import torch
 
 from sklearn.decomposition import PCA
 
-from geopres_trainer import EmbeddingsDataset
-from config import STORAGE_PATH
+from geopres.geopres_trainer import EmbeddingsDataset
+from geopres.config import STORAGE_PATH, embeddings_file
 
 
 def fit_pca_and_save(
@@ -25,13 +25,7 @@ def fit_pca_and_save(
     os.makedirs(output_path, exist_ok=True)
 
     # Load the precalculated embeddings
-    tensor_path = os.path.join(
-        STORAGE_PATH,
-        "precalculated_embeddings",
-        dataset_path.split("/")[-1],
-        model_name.replace("/", "__"),
-        "train_embeddings.pt"
-    )
+    tensor_path = embeddings_file(dataset_path, model_name, "train")
     if not os.path.exists(tensor_path):
         raise FileNotFoundError(
             f"Precalculated embeddings not found at {tensor_path}"

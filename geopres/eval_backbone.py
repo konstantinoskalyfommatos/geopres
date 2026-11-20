@@ -1,12 +1,17 @@
-from sentence_transformers import SentenceTransformer
-from argparse import ArgumentParser
-import torch
+"""Evaluate a raw backbone (no projection) on MTEB, for reference.
+
+    geopres-eval-backbone --backbone_model Alibaba-NLP/gte-multilingual-base
+"""
+
 import logging
 import os
-from config import EVALUATION_RESULTS_PATH, parse_dtype
+from argparse import ArgumentParser
 
-from eval_utils import evaluate_mteb
+import torch
 
+from geopres.config import EVALUATION_RESULTS_PATH, default_device, parse_dtype
+from geopres.encode import load_backbone
+from geopres.eval_utils import evaluate_mteb
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
@@ -15,10 +20,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-if __name__ == "__main__":
-    parser = ArgumentParser(description="Evaluate a reduced SentenceTransformer model on Benchmarks")
+def main() -> None:
+    parser = ArgumentParser(description="Evaluate a raw SentenceTransformer model on MTEB")
     parser.add_argument(
-        "--backbone_model", type=str, 
+        "--backbone_model", type=str,
         help="Name or path of the backbone SentenceTransformer model",
         default="Alibaba-NLP/gte-multilingual-base"
     )
@@ -35,30 +40,20 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite_cache", action="store_true", help="Overwrite MTEB evaluation cache results")
     parser.add_argument("--backbone_dtype", type=str, default=None, help="dtype for backbone model (e.g., float16, bfloat16)")
     parser.add_argument("--revision", type=str, default=None, help="Specific model revision/commit hash to load")
+    parser.add_argument("--device", type=str, default=None, help="cuda / cpu (default: cuda if available)")
 
     args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
-        )
-
-    dtype = None
-    if args.backbone_dtype:
-        dtype = parse_dtype(args.backbone_dtype)
-
-    model = SentenceTransformer(
-        args.backbone_model, 
-        device="cuda", 
-        trust_remote_code=True,
-        revision=args.revision
+    model = load_backbone(
+        args.backbone_model,
+        device=args.device or default_device(),
+        dtype=parse_dtype(args.backbone_dtype) if args.backbone_dtype else None,
+        revision=args.revision,
     )
-    if dtype is not None:
-        model = model.to(dtype=dtype)
-    model.eval()
 
-    # Evaluate the model
-    cache_path = os.path.join(EVALUATION_RESULTS_PATH, "backbone", args.backbone_model.replace("/", "__"))
+    cache_path = os.path.join(
+        EVALUATION_RESULTS_PATH, "backbone", args.backbone_model.replace("/", "__")
+    )
 
     evaluate_mteb(
         model=model,
@@ -68,11 +63,14 @@ if __name__ == "__main__":
         classification_batch_size=args.classification_batch_size,
         clustering_batch_size=args.clustering_batch_size,
         skip_sts=args.skip_sts,
-        skip_classification=args.skip_classification,
         skip_retrieval=args.skip_retrieval,
+        skip_classification=args.skip_classification,
         skip_clustering=args.skip_clustering,
         fast_mode=args.fast_mode,
         overwrite_cache=args.overwrite_cache,
     )
     logger.info("Evaluation completed.")
-    
+
+
+if __name__ == "__main__":
+    main()

@@ -1,11 +1,14 @@
+"""A ``SentenceTransformer`` that also applies a trained GeoPres projection."""
+
 import logging
+import os
+
 import torch
 import torch.nn as nn
-from mteb.models.model_meta import ModelMeta
-
-from sentence_transformers import SentenceTransformer
 from safetensors.torch import load_file
-import os
+from sentence_transformers import SentenceTransformer
+
+from geopres.config import default_device
 
 
 logger = logging.getLogger(__name__)
@@ -43,19 +46,20 @@ class ReducedSentenceTransformer(SentenceTransformer):
         model_name_or_path: str,
         projection: nn.Module,
         output_dim: int,
-        device: str = "cuda",
+        device: str | None = None,
         custom_model_name: str | None = None,
         max_seq_length: int = 512,
         dtype: torch.dtype | None = None,
         **kwargs
     ):
+        device = device or default_device()
         base_model = SentenceTransformer(
-            model_name_or_path, 
-            device=device, 
+            model_name_or_path,
+            device=device,
             trust_remote_code=True,
             **kwargs
         )
-        base_model.max_sequence_length = max_seq_length
+        base_model.max_seq_length = max_seq_length
 
         if dtype is not None:
             base_model = base_model.to(dtype=dtype)
