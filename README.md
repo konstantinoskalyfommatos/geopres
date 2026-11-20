@@ -5,7 +5,7 @@ Official code for **"On Post-Hoc Dimensionality Reduction of Text Embeddings"**.
 GeoPres compresses high-dimensional text embeddings with a **single linear map**
 that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
 embedding model stays frozen, and at inference time the whole "reduction" is one
-matrix multiply.
+matrix multiply. The method is described in our [**EACL paper: "On Post-Hoc Dimensionality Reduction of Text Embeddings"**](https://openreview.net/forum?id=vAWo3CIzqp).
 
 This repository contains two things:
 
@@ -14,23 +14,6 @@ This repository contains two things:
 2. **The paper's experimental pipeline** — pre-encode 10M C4 passages, train,
    run MTEB, compare against PCA / random projection / random selection /
    truncation / autoencoder baselines, and rebuild the paper's tables and plots.
-
----
-
-## The idea in one paragraph
-
-Given a frozen embedding model `g: X -> R^n` and a target dimension `k < n`, we
-learn `f(y) = W y` with `W` in `R^{k x n}`. For a batch of embeddings
-`B = {y_1, ..., y_m}` we minimise
-
-$$\mathcal{L} = \frac{1}{\binom{m}{2}} \sum_{i < j} \left( d_{ij} - d^{f}_{ij} \right)^2,$$
-
-where `d_ij` is the Euclidean distance between two original embeddings and
-`d^f_ij` the distance between their projections. Preserving this geometry is
-enough for downstream tasks (retrieval, STS, classification, clustering) to keep
-working on the compressed vectors. See the paper for the full study, the
-baselines, and the analysis of which intrinsic metric predicts downstream
-quality.
 
 ---
 
@@ -63,6 +46,8 @@ your CUDA toolchain; see [Common issues](#common-issues).
 
 ## Quick start (library)
 
+Fitting a dimensional reduced embedding model:
+
 ```python
 from geopres import GeoPres
 
@@ -71,9 +56,9 @@ model.fit(texts)                       # texts: list[str]
 reduced = model.embed(texts)           # numpy array, shape (len(texts), 32)
 
 model.save("geopres-mpnet-32")
-```
+``` 
 
-`fit` also accepts embeddings you already have, which is much cheaper:
+Note that `fit` also accepts embeddings you already have, which allows much cheaper training:
 
 ```python
 import torch
