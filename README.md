@@ -5,13 +5,17 @@ that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
 embedding model stays frozen, and at inference time the whole "reduction" is one
 matrix multiply. The method is described in our [**EACL paper: "On Post-Hoc Dimensionality Reduction of Text Embeddings"**](https://openreview.net/forum?id=vAWo3CIzqp).
 
-This repository contains features two parts:
+This repository features three parts:
 
 1. **`geopres`, a small library** — train a projection on your own embeddings,
    save it, reload it, and use it on new text (no GPU required).
-2. **The paper's experimental pipeline** — pre-encode 10M C4 passages, train,
+   - [Install](#install)
+   - [Quick start (library)](#Quick-start-(library))
+   - ...
+2. [**Reproducing the paper**](#Reproducing-the-paper): pre-encode 10M C4 passages, train,
    run MTEB, compare against PCA / random projection / random selection /
    truncation / autoencoder baselines, and rebuild the paper's tables and plots.
+3. [**Miscellanea**](Miscellanea) like a repository overview, FAQ, and a bibtex citation that you can use for citing the project.
 
 ---
 
@@ -230,7 +234,9 @@ gated datasets.
 
 ---
 
-## Repository layout
+## Miscellanea
+
+### Repository layout overview
 
 ```
 geopres/
@@ -255,9 +261,9 @@ tests/                              # pytest: API, persistence, losses, hub (no 
 
 ---
 
-## Common issues
+### Common issues
 
-### `torchsort` fails to install or build
+#### `torchsort` fails to install or build
 
 `torchsort` is only needed for `--spearman`. It builds from source, so it needs
 a CUDA toolchain. If that fails, install a pre-built wheel from the
@@ -272,12 +278,12 @@ export PYTHON=cp312    # cp310, cp311, cp312
 uv pip install https://github.com/teddykoker/torchsort/releases/download/v${TORCHSORT}/torchsort-${TORCHSORT}+${TORCH}${CUDA}-${PYTHON}-${PYTHON}-linux_x86_64.whl
 ```
 
-### `Alibaba-NLP/gte-multilingual-base` (mGTE) breaks with newer transformers
+#### `Alibaba-NLP/gte-multilingual-base` (mGTE) breaks with newer transformers
 
 The paper's environment pins `transformers==4.57.6`. Newer versions break mGTE
 at encode time. If you change the pin, re-test mGTE.
 
-### Out of memory during training
+#### Out of memory during training
 
 Memory is dominated by the pairwise loss, which compares every pair of
 embeddings in a batch, so it grows quadratically with the batch size. The paper
@@ -292,14 +298,14 @@ a task or two) instead of assuming the published numbers carry over.
 
 ---
 
-## Development
+### Development
 
 ```bash
 uv sync --extra research
 uv run pytest            # fast, CPU-only, no downloads
 ```
 
-## Citation
+### Citation
 
 ```bibtex
 @inproceedings{kalyfommatos2027geopres,
