@@ -77,13 +77,49 @@ model = GeoPres.load_path("geopres-mpnet-32")       # backbone id comes from con
 reduced = model.embed(["a sentence I have never seen before"])
 ```
 
-The projection is a plain matrix, so it also works on embeddings produced
-elsewhere:
+The projection is a plain matrix, therefore it can be applied on embeddings
+created elsewhere (e.g. Hugging Face's
+[TEI](https://huggingface.co/docs/text-embeddings-inference)), as long as the
+underlying vector-generator function (e.g. embedding model) is the same during
+training and inference. "Same" includes the pooling, the normalisation and, for
+instruction-based models such as Qwen3-Embedding, the same query/passage
+prefixes.
+
+`Projection` is the API for exactly that: the matrix and nothing else. No
+backbone is loaded, downloaded or needed.
 
 ```python
-model = GeoPres.load_path("geopres-mpnet-32")       # no backbone needed
-reduced = model.embed(some_768_dim_vectors)         # (n, 32)
+from geopres import Projection
+
+projection = Projection.load_path("geopres-mpnet-32")
+# or: Projection.from_pretrained("kkalyfo/geopres-mpnet-32")
+projection.source_dim, projection.dim                # (768, 32)
+
+# any vector from the same embedding model: TEI, a vector DB, another service
+vector = get_embedding(embedding_model_name="sentence-transformers/all-mpnet-base-v2")
+reduced = projection.project(vector)                # (32,)
+
+vectors = ...                                       # (1000, 768)
+reduced = projection.project(vectors)               # (1000, 32)
 ```
+
+If you would rather not depend on `geopres` at inference time, the matrix is
+just `projection.weight`, of shape `(dim, source_dim)`: one `vectors @ weight.T`.
+It is read-only, so a trained projection cannot be changed by accident.
+
+Numpy in, numpy out; a tensor in, a tensor out on the same device and dtype.
+Vectors that already live on a GPU are therefore never copied to the host:
+
+```python
+vectors = torch.load("gpu_embeddings.pt").cuda()     # stays on the GPU
+reduced = projection.project(vectors)                # torch.Tensor, cuda
+
+projection.to_torch(device="cuda")                   # frozen nn.Linear, e.g. for torch.compile / ONNX
+```
+
+The projection is one `768 x 32` matrix, so it is memory-bound: on CPU it costs
+about the same as the copy it would take to move the vectors to a GPU. Keep it
+on whichever device already holds the vectors.
 
 Upload your own projection, or load one from the Hub:
 
@@ -104,12 +140,13 @@ Trained projections released with the paper live under
 | --- | --- |
 | `GeoPres(model, dim=32)` | `model` is a sentence-transformers id, a loaded `SentenceTransformer`, or `None` (embeddings only). |
 | `.fit(data, ...)` | Train on texts or on an `(n, source_dim)` array/tensor. Returns `self`. |
-| `.embed(data, ...)` | Project texts or embeddings to `dim`. Returns `(n, dim)` numpy by default. |
+| `.embed(data, ...)` | Project texts or embeddings to `dim`. Returns `(n, dim)` numpy by default, `(dim,)` for a single vector. |
 | `.save(path)` | Writes `config.json` + `projection.safetensors`. |
 | `GeoPres.load_path(path)` | Reloads a saved directory (or a bare `.pt` / `.safetensors` weight file). |
 | `.to_sentence_transformer()` | Backbone + projection as a `SentenceTransformer`, e.g. for MTEB. |
 | `.push_to_hub(repo_id, private=False)` | Upload `config.json`, weights and a model card to the HF Hub. |
 | `GeoPres.from_pretrained(repo_id)` | Download and load a projection from the HF Hub. |
+| `Projection.load_path(path)` / `.from_pretrained(repo_id)` | The projection alone, for embeddings you already have. `.project(vectors)`, no backbone. `.to_torch()` for the `nn.Module`. |
 
 `fit` defaults follow the paper (10 epochs, AdamW, lr 1e-2, weight decay 0.1,
 linear warmup 0.1, early stopping patience 3, batch size 20 000). Batch size is
@@ -189,7 +226,7 @@ gated datasets.
 
 ```
 geopres/
-├── api.py                          # public API: GeoPres (fit / embed / save / load_path)
+├── api.py                          # public API: GeoPres (fit / embed / save) and Projection
 ├── projection.py                   # the linear map W (a bias-free nn.Linear)
 ├── losses.py                       # positional / angular / Spearman losses
 ├── encode.py                       # loading a backbone and encoding text

@@ -22,7 +22,8 @@ more.
 ## Layout
 
 - `geopres/api.py` — public API (`GeoPres.fit` / `.embed` / `.save` /
-  `GeoPres.load_path` / `.push_to_hub` / `GeoPres.from_pretrained`). Keep it free
+  `GeoPres.load_path` / `.push_to_hub` / `GeoPres.from_pretrained`, plus
+  `Projection`, the backbone-free matrix). Keep it free
   of `mteb`, `datasets`, `torchsort` and `huggingface_hub` module-level imports:
   `import geopres` must stay light and work with core dependencies only.
 - `geopres/projection.py` — the linear map `W`, a bias-free `nn.Linear`, so

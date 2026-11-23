@@ -31,6 +31,10 @@ from geopres.projection import LinearProjection
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
+# What the API accepts: a numpy array, a torch tensor, or plain python lists.
+ArrayLike = np.ndarray | torch.Tensor
+EmbeddingsLike = ArrayLike | Sequence[float] | Sequence[Sequence[float]]
+
 logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
@@ -46,6 +50,60 @@ def _ensure_logging() -> None:
 
 def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).replace("torch.", "")
+
+
+def _source_dim_error(
+    shape: tuple[int, ...], source_dim: int, backbone: str | None
+) -> ValueError:
+    """The same error from every inference path, so the messages cannot drift."""
+    return ValueError(
+        f"Expected {source_dim}-dimensional embeddings, got shape {shape}. "
+        f"This projection was trained for backbone {backbone!r}."
+    )
+
+
+def _empty_embeddings_error() -> ValueError:
+    """An empty batch is a caller bug, not a result."""
+    return ValueError("No embeddings given: expected at least one vector.")
+
+
+def _read_projection(path: str | Path) -> tuple[LinearProjection, dict[str, Any]]:
+    """Read the weights and ``config.json`` from a saved directory or a weight file."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No such file or directory: {path}")
+
+    config: dict[str, Any] = {}
+    if path.is_dir():
+        config_path = path / CONFIG_FILENAME
+        if config_path.exists():
+            config = json.loads(config_path.read_text())
+
+        weights_path = path / WEIGHTS_FILENAME
+        if not weights_path.exists():
+            candidates = sorted(path.glob("*.safetensors")) + sorted(path.glob("*.pt"))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No projection weights found in {path} "
+                    f"(expected {WEIGHTS_FILENAME}, *.safetensors or *.pt)"
+                )
+            weights_path = candidates[0]
+    else:
+        weights_path = path
+
+    return LinearProjection.load(str(weights_path)), config
+
+
+def _download_projection(repo_id: str, revision: str | None, token: str | None) -> str:
+    """Download the projection files of a Hub repo and return the local folder."""
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        repo_id=repo_id,
+        revision=revision,
+        token=token,
+        allow_patterns=[CONFIG_FILENAME, WEIGHTS_FILENAME, "*.safetensors"],
+    )
 
 
 class GeoPres:
@@ -126,7 +184,11 @@ class GeoPres:
 
     @property
     def projection(self) -> LinearProjection:
-        """The trained ``dim x source_dim`` linear map."""
+        """The trained ``dim x source_dim`` linear map.
+
+        This is the torch module. For the numpy-only equivalent, see
+        :class:`Projection` (``Projection(model.projection.weight)``).
+        """
         if self._projection is None:
             raise RuntimeError(
                 "No projection yet: call fit(...) first, or load a trained one "
@@ -406,24 +468,32 @@ class GeoPres:
         """Project texts or high-dimensional embeddings into ``dim`` dimensions.
 
         Args:
-            data: texts or embeddings of shape ``(n, source_dim)``.
+            data: texts, one embedding of shape ``(source_dim,)``, or a batch of
+                shape ``(n, source_dim)``.
             batch_size: batch size for encoding and projecting.
             normalize: L2-normalise the output (the projection does not
                 preserve norms exactly).
             as_numpy: return a numpy array (default) instead of a tensor.
 
         Returns:
-            Array of shape ``(n, dim)``.
+            Array of shape ``(n, dim)``, or ``(dim,)`` for a single embedding.
+
+        Raises:
+            ValueError: on an empty batch or embeddings of the wrong dimension.
         """
         projection = self.projection
         embeddings = self._to_embeddings(
             data, batch_size=batch_size, show_progress_bar=show_progress_bar
         )
-        if embeddings.shape[1] != projection.source_dim:
-            raise ValueError(
-                f"Expected {projection.source_dim}-dimensional embeddings, "
-                f"got {embeddings.shape[1]}. This projection was trained for "
-                f"backbone {self.model_name!r}."
+        if embeddings.numel() == 0:
+            raise _empty_embeddings_error()
+
+        single = embeddings.ndim == 1
+        if single:
+            embeddings = embeddings[None, :]
+        if embeddings.ndim != 2 or embeddings.shape[1] != projection.source_dim:
+            raise _source_dim_error(
+                tuple(embeddings.shape), projection.source_dim, self.model_name
             )
 
         projection.eval()
@@ -439,6 +509,8 @@ class GeoPres:
                 chunks.append(reduced.cpu())
 
         result = torch.cat(chunks, dim=0)
+        if single:
+            result = result[0]
         return result.numpy() if as_numpy else result
 
     def to_sentence_transformer(
@@ -510,29 +582,7 @@ class GeoPres:
                 stored in ``config.json``.
             device: device for the projection.
         """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"No such file or directory: {path}")
-
-        config: dict[str, Any] = {}
-        if path.is_dir():
-            config_path = path / CONFIG_FILENAME
-            if config_path.exists():
-                config = json.loads(config_path.read_text())
-
-            weights_path = path / WEIGHTS_FILENAME
-            if not weights_path.exists():
-                candidates = sorted(path.glob("*.safetensors")) + sorted(path.glob("*.pt"))
-                if not candidates:
-                    raise FileNotFoundError(
-                        f"No projection weights found in {path} "
-                        f"(expected {WEIGHTS_FILENAME}, *.safetensors or *.pt)"
-                    )
-                weights_path = candidates[0]
-        else:
-            weights_path = path
-
-        projection = LinearProjection.load(str(weights_path))
+        projection, config = _read_projection(path)
         if config.get("dim") and int(config["dim"]) != projection.dim:
             logger.warning(
                 f"config.json says dim={config['dim']} but the weights are "
@@ -559,6 +609,7 @@ class GeoPres:
         private: bool = False,
         token: str | None = None,
         commit_message: str = "Upload GeoPres projection",
+        model_card: str | None = None,
     ) -> str:
         """Upload ``config.json``, the weights and a model card to the HF Hub.
 
@@ -567,6 +618,8 @@ class GeoPres:
             private: create the repo as private.
             token: HF token; defaults to the one in your environment / login.
             commit_message: commit message for the upload.
+            model_card: full ``README.md`` to upload. Defaults to
+                :meth:`model_card`.
 
         Returns:
             The URL of the model repository.
@@ -586,7 +639,7 @@ class GeoPres:
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "projection"
             self.save(folder)
-            (folder / "README.md").write_text(self._model_card(repo_id))
+            (folder / "README.md").write_text(model_card or self.model_card(repo_id))
             api.upload_folder(
                 folder_path=str(folder),
                 repo_id=repo_id,
@@ -617,18 +670,11 @@ class GeoPres:
             device: device for the projection.
             token: HF token, for private repositories.
         """
-        from huggingface_hub import snapshot_download
-
-        local_dir = snapshot_download(
-            repo_id=repo_id,
-            revision=revision,
-            token=token,
-            allow_patterns=[CONFIG_FILENAME, WEIGHTS_FILENAME, "*.safetensors"],
-        )
+        local_dir = _download_projection(repo_id, revision, token)
         return cls.load_path(local_dir, model=model, device=device)
 
-    def _model_card(self, repo_id: str) -> str:
-        """Minimal model card for the Hub."""
+    def model_card(self, repo_id: str) -> str:
+        """Default model card for the Hub, used by :meth:`push_to_hub`."""
         projection = self.projection
         return f"""---
 library_name: geopres
@@ -644,6 +690,12 @@ Linear map `W` ({projection.dim} x {projection.source_dim}) trained with
 [GeoPres](https://github.com/konstantinoskalyfommatos/geopres) to preserve
 pairwise Euclidean distances between `{self.model_name}` embeddings.
 
+Backbone (frozen, not included): [{self.model_name}](https://huggingface.co/{self.model_name})
+
+Paper: [On Post-Hoc Dimensionality Reduction of Text Embeddings](https://openreview.net/forum?id=vAWo3CIzqp) (EACL 2027)
+
+## Encode text and reduce it
+
 ```python
 from geopres import GeoPres
 
@@ -651,8 +703,199 @@ model = GeoPres.from_pretrained("{repo_id}")
 reduced = model.embed(["some text"])   # (1, {self.dim})
 ```
 
+## Reduce embeddings you already have
+
+If your embeddings come from somewhere else (TEI, a vector database, a batch
+job), use the matrix on its own. Nothing is encoded and the backbone is not
+downloaded:
+
+```python
+from geopres import Projection
+
+projection = Projection.from_pretrained("{repo_id}")
+reduced = projection.project(embeddings)   # (n, {projection.source_dim}) -> (n, {projection.dim})
+```
+
+The input must be `{self.model_name}` embeddings, computed with the same
+pooling, normalisation and prefixes as the training data.
+
 The backbone is frozen; inference is one matrix multiply.
 """
+
+
+class Projection:
+    """A trained GeoPres projection on its own: a matrix, no backbone.
+
+    Use this when you already have embeddings and only want to reduce them, e.g.
+    vectors produced by Hugging Face's TEI, a vector database or another
+    service. Nothing is encoded, and no backbone is loaded or downloaded.
+
+    The embeddings must come from the model the projection was trained on, with
+    the same pooling, normalisation and (for instruction-based models such as
+    Qwen3-Embedding) the same query/passage prefixes.
+
+    Numpy in, numpy out; a tensor in, a tensor out on the same device and with
+    the same dtype. Vectors that already live on a GPU are therefore never
+    copied to the host.
+
+    This is the numpy counterpart of :class:`~geopres.projection.LinearProjection`
+    (the ``nn.Module`` that ``GeoPres.projection`` returns). Use
+    :meth:`to_torch` to get that module back.
+
+    Args:
+        weight: the ``(dim, source_dim)`` matrix. It is copied, and the copy is
+            read-only, so later changes to the input cannot alter the projection.
+        backbone: id of the embedding model it was trained for (informational).
+        training_info: whatever ``config.json`` recorded about the run.
+    """
+
+    def __init__(
+        self,
+        weight: EmbeddingsLike,
+        *,
+        backbone: str | None = None,
+        training_info: dict[str, Any] | None = None,
+    ):
+        if isinstance(weight, torch.Tensor):
+            weight = weight.detach().float().cpu().numpy()
+
+        # Own the memory: ``np.asarray`` would alias a float32 input, so a caller
+        # changing its own array would silently change the projection.
+        self.weight = np.array(weight, dtype=np.float32, copy=True)
+        if self.weight.ndim != 2:
+            raise ValueError(
+                f"weight must be 2-D with shape (dim, source_dim), got {self.weight.shape}"
+            )
+        self.weight.flags.writeable = False
+
+        self.backbone = backbone
+        self.training_info = dict(training_info or {})
+        # The matrix as a tensor, per (device, dtype), so a GPU caller does not
+        # copy it to the device again on every call.
+        self._torch_weights: dict[tuple[str, torch.dtype], torch.Tensor] = {}
+
+    @property
+    def dim(self) -> int:
+        """Target dimensionality."""
+        return self.weight.shape[0]
+
+    @property
+    def source_dim(self) -> int:
+        """Dimensionality of the embeddings this projection expects."""
+        return self.weight.shape[1]
+
+    def __repr__(self) -> str:
+        return (
+            f"Projection(backbone={self.backbone!r}, "
+            f"source_dim={self.source_dim}, dim={self.dim})"
+        )
+
+    def project(
+        self, embeddings: EmbeddingsLike, *, normalize: bool = False
+    ) -> np.ndarray | torch.Tensor:
+        """Project one ``(source_dim,)`` vector or a ``(n, source_dim)`` batch.
+
+        Args:
+            embeddings: numpy array, list or tensor of embeddings.
+            normalize: L2-normalise the output (the projection does not
+                preserve norms exactly).
+
+        Returns:
+            ``(dim,)`` for a single vector, ``(n, dim)`` for a batch. A tensor
+            input gives a tensor on the same device and dtype.
+
+        Raises:
+            ValueError: on an empty batch or embeddings of the wrong dimension.
+        """
+        if isinstance(embeddings, torch.Tensor):
+            return self._project_torch(embeddings, normalize=normalize)
+
+        vectors = np.asarray(embeddings, dtype=np.float32)
+        given_shape = vectors.shape
+        if vectors.size == 0:
+            raise _empty_embeddings_error()
+
+        single = vectors.ndim == 1
+        if single:
+            vectors = vectors[None, :]
+        if vectors.ndim != 2 or vectors.shape[1] != self.source_dim:
+            raise _source_dim_error(given_shape, self.source_dim, self.backbone)
+
+        reduced = vectors @ self.weight.T
+        if normalize:
+            norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+            reduced = reduced / np.maximum(norms, 1e-12)
+        return reduced[0] if single else reduced
+
+    def _project_torch(
+        self, embeddings: torch.Tensor, *, normalize: bool
+    ) -> torch.Tensor:
+        """Project a tensor without leaving its device or changing its dtype."""
+        if not embeddings.is_floating_point():
+            embeddings = embeddings.float()
+        if embeddings.numel() == 0:
+            raise _empty_embeddings_error()
+
+        single = embeddings.ndim == 1
+        if single:
+            embeddings = embeddings.unsqueeze(0)
+        if embeddings.ndim != 2 or embeddings.shape[1] != self.source_dim:
+            raise _source_dim_error(
+                tuple(embeddings.shape), self.source_dim, self.backbone
+            )
+
+        weight = self._torch_weight(embeddings.device, embeddings.dtype)
+        reduced = embeddings @ weight.T
+        if normalize:
+            reduced = torch.nn.functional.normalize(reduced, p=2, dim=1)
+        return reduced[0] if single else reduced
+
+    def _torch_weight(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        key = (str(device), dtype)
+        weight = self._torch_weights.get(key)
+        if weight is None:
+            weight = torch.tensor(self.weight, device=device, dtype=dtype)
+            self._torch_weights[key] = weight
+        return weight
+
+    def to_torch(self, *, device: str | torch.device | None = None) -> LinearProjection:
+        """Return the matrix as a frozen ``LinearProjection``.
+
+        Useful to run the projection on a GPU, inside ``torch.compile``, or to
+        export it (TorchScript, ONNX). :meth:`project` is faster on CPU.
+        """
+        linear = LinearProjection(self.source_dim, self.dim)
+        with torch.no_grad():
+            linear.weight.copy_(torch.tensor(self.weight))
+        if device is not None:
+            linear = linear.to(device)
+        return linear.eval().requires_grad_(False)
+
+    @classmethod
+    def load_path(cls, path: str | Path) -> "Projection":
+        """Load a directory written by :meth:`GeoPres.save`, or a bare weight file."""
+        linear, config = _read_projection(path)
+        if config.get("dim") and int(config["dim"]) != linear.dim:
+            logger.warning(
+                f"config.json says dim={config['dim']} but the weights are "
+                f"{linear.dim}-dimensional; using the weights."
+            )
+        return cls(
+            linear.weight.detach().cpu().numpy(),
+            backbone=config.get("backbone"),
+            training_info=config.get("training"),
+        )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        repo_id: str,
+        *,
+        revision: str | None = None,
+        token: str | None = None,
+    ) -> "Projection":
+        """Load a projection from the HF Hub, e.g. ``"kkalyfo/geopres-mpnet-32"``."""
+        return cls.load_path(_download_projection(repo_id, revision, token))
 
 
 def _linear_warmup_decay(step: int, warmup_steps: int, total_steps: int) -> float:
