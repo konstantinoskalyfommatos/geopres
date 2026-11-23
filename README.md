@@ -9,8 +9,8 @@ This repository features three parts:
 
 1. **`geopres`, a small library** — train a projection on your own embeddings,
    save it, reload it, and use it on new text (no GPU required).
-   - [Install](#install)
-   - [Quick start (library)](#Quick-start-(library))
+   - [**Install]**(#install)
+   - [**Quick start (library)**](#Quick-start-(library))
    - ...
 2. [**Reproducing the paper**](#Reproducing-the-paper): pre-encode 10M C4 passages, train,
    run MTEB, compare against PCA / random projection / random selection /
