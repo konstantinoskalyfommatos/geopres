@@ -305,8 +305,8 @@ uv run pytest            # fast, CPU-only, no downloads
 }
 ```
 
-See also [`CITATION.cff`](CITATION.cff).
+See also [`CITATION.cff`](https://github.com/konstantinoskalyfommatos/geopres/blob/main/CITATION.cff).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](https://github.com/konstantinoskalyfommatos/geopres/blob/main/LICENSE).
