@@ -26,12 +26,15 @@ def test_push_to_hub_requires_a_backbone_id():
 
 def test_model_card_mentions_backbone_and_dim(fitted_model):
     model, _ = fitted_model
-    card = model._model_card("kkalyfo/geopres-test")
+    card = model.model_card("kkalyfo/geopres-test")
 
     assert card.startswith("---")
     assert "library_name: geopres" in card
     assert "sentence-transformers/all-mpnet-base-v2" in card
     assert "GeoPres.from_pretrained(\"kkalyfo/geopres-test\")" in card
+    assert "Projection.from_pretrained(\"kkalyfo/geopres-test\")" in card
+    assert "https://huggingface.co/sentence-transformers/all-mpnet-base-v2" in card
+    assert "https://openreview.net/forum?id=vAWo3CIzqp" in card
 
 
 def test_from_pretrained_loads_the_downloaded_folder(fitted_model, tmp_path, monkeypatch):
