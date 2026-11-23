@@ -77,7 +77,7 @@ def precalculate_train_embeddings(
             break
 
         text = ex[text_column]
-        # Keep small ones without tokenizing to save time
+        # Use only useful enough passages
         if len(text.split()) < 200:
             continue
         examples.append(ex)
