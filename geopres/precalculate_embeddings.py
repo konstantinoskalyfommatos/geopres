@@ -185,7 +185,16 @@ def main() -> None:
     parser.add_argument("--train", action="store_true", help="Precalculate training embeddings")
     parser.add_argument("--val_test", action="store_true", help="Precalculate validation and test embeddings")
     parser.add_argument("--batch_size", type=int, default=8192, help="1024 works well for 24GB GPU memory and Alibaba-NLP/gte-multilingual-base")
-    parser.add_argument("--max_train_examples", type=int, default=10_000_000, help="Maximum number of training examples to process")
+    parser.add_argument(
+        "--max_train_examples",
+        type=int,
+        default=10_000_000,
+        help=(
+            "Maximum number of training examples to process. The default is the paper's "
+            "10M: results kept improving with more data. A few hundred thousand examples "
+            "(e.g. 300000) are enough for a good projection and encode much faster."
+        ),
+    )
     parser.add_argument("--max_val_examples", type=int, default=10_000, help="Maximum number of validation examples to process")
     parser.add_argument("--max_test_examples", type=int, default=10_000, help="Maximum number of test examples to process")
     parser.add_argument("--encode_every", type=int, default=100_000, help="Number of examples to encode before saving intermediate results")
@@ -198,8 +207,9 @@ def main() -> None:
     device = args.device or default_device()
     if device == "cpu":
         logger.warning(
-            "Encoding 10M C4 passages on CPU is extremely slow. "
-            "Use a GPU, or lower --max_train_examples."
+            "Encoding 10M C4 passages on CPU is extremely slow. Use a GPU, or "
+            "lower --max_train_examples: a few hundred thousand examples are "
+            "enough for a good projection."
         )
 
     dtype = parse_dtype(args.backbone_dtype) if args.backbone_dtype else None

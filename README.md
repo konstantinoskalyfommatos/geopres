@@ -153,6 +153,10 @@ linear warmup 0.1, early stopping patience 3, batch size 20 000). Batch size is
 a hyperparameter, not only a memory setting: the loss compares all pairs inside
 a batch, so a smaller batch trains on a different signal.
 
+Data size matters less than batch size. The paper trained on 10M passages
+because more data kept helping, but a few hundred thousand text samples are
+enough to get a good projection (see [Data](#reproducing-the-paper)).
+
 ---
 
 ## Reproducing the paper
@@ -189,6 +193,11 @@ if you prefer not to use the console scripts.
 words) for training and `agentlans/sentence-paraphrases` for validation/test.
 No dataset is downloaded by the library; only step 1 needs the `datasets`
 package.
+
+We used 10M training samples because results kept improving as we added more
+data, but this is not a requirement: a few hundred thousand text samples are
+already enough for a good projection, and they make the one-time encoding step
+much cheaper. Pass `--max_train_examples` to cap the training set.
 
 **Baselines** read the same cached embeddings:
 

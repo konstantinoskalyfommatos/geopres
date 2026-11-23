@@ -272,11 +272,13 @@ class GeoPres:
 
         Args:
             data: texts (encoded with the backbone) or embeddings of shape
-                ``(n, source_dim)``. The paper uses 10M C4 passages; a few
-                hundred thousand embeddings of your own corpus should also work.
+                ``(n, source_dim)``. The paper uses 10M C4 passages because
+                results kept improving with more data, but that is not a
+                requirement: a few hundred thousand samples are enough for a
+                good projection.
             epochs: default 10, as in the paper.
             batch_size: embeddings per step. Defaults to the paper's 20 000
-                (RTX 3090). It is a hyperparameter, not just a memory setting:
+                (an RTX 3090 can handle this size). It is a hyperparameter, not just a memory setting:
                 the loss compares all pairs inside a batch, so a smaller batch
                 changes the training signal.
             learning_rate, weight_decay, warmup_ratio: optimizer settings
