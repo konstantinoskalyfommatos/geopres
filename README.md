@@ -11,7 +11,7 @@ This repository features three parts:
    save it, reload it, and use it on new text (no GPU required).
    - [**Install**](#install)
    - [**Quick start (library)**](#Quick-start-(library))
-   - ...
+   - [**API summary**](#API-summary)
 2. [**Reproducing the paper**](#Reproducing-the-paper): pre-encode 10M C4 passages, train,
    run MTEB, compare against PCA / random projection / random selection /
    truncation / autoencoder baselines, and rebuild the paper's tables and plots.
