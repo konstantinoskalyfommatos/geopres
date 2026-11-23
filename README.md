@@ -17,7 +17,7 @@ This repository contains features two parts:
 
 ## Install
 
-Python 3.12 is required.
+Python 3.10 or newer is required (tested on 3.10, 3.11, 3.12 and 3.13).
 
 ```bash
 git clone https://github.com/konstantinoskalyfommatos/geopres
@@ -36,9 +36,8 @@ pip install -e ".[spearman]"                 # + torchsort, only for the --spear
 `torchsort` is not installed by default because it has to be compiled against
 your CUDA toolchain; see [Common issues](#common-issues).
 
-> **PyPI.** The package metadata is release-ready (`uv build` produces a wheel
-> and an sdist), so `pip install geopres` will work as soon as the first release
-> is uploaded.
+> **PyPI.** `pip install geopres` installs the library only. Add `[research]`
+> or `[spearman]` for the paper pipeline: `pip install "geopres[research]"`.
 
 ---
 
