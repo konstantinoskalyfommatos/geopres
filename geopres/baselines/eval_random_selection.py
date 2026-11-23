@@ -5,9 +5,9 @@ import os
 import logging
 import sys
 
-from config import EVALUATION_RESULTS_PATH, parse_dtype
-from reduced_sentence_transformer import ReducedSentenceTransformer
-from eval_utils import eval_intrinsic, evaluate_mteb
+from geopres.config import EVALUATION_RESULTS_PATH, default_device, parse_dtype
+from geopres.reduced_sentence_transformer import ReducedSentenceTransformer
+from geopres.eval_utils import eval_intrinsic, evaluate_mteb
 
 
 # Set random seed for reproducibility
@@ -43,9 +43,7 @@ if __name__ == "__main__":
     logger.info(f"Args: {args}")
 
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
-        )
+        logger.warning("CUDA is not available, falling back to CPU (this will be slow).")
 
     dtype = None
     if args.backbone_dtype:
@@ -60,7 +58,7 @@ if __name__ == "__main__":
     
     projection_head = nn.Linear(args.source_dim, args.target_dim, bias=False)
     projection_head.weight = nn.Parameter(M.t())
-    projection_head = projection_head.to("cuda")
+    projection_head = projection_head.to(default_device())
 
     logger.info(f"Random selection head:\n{projection_head}")
 

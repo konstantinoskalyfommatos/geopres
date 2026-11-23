@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import os
-from config import EVALUATION_RESULTS_PATH, STORAGE_PATH
+from geopres.config import EVALUATION_RESULTS_PATH, STORAGE_PATH
 
 
 def get_desired_dimensions(model_name=None):
@@ -132,8 +132,6 @@ def create_grouped_bar_plots(
                 winner = max(dim_values, key=dim_values.get)
                 winners[dim_idx] = winner
 
-            last_pos = x_positions[-1]
-
             hatches = {
                 'GeoPres': '///',
                 'pca': '',
@@ -207,7 +205,7 @@ if __name__ == "__main__":
     print("Creating performance plots")
 
     RESULTS_PATH = os.path.join(EVALUATION_RESULTS_PATH, "comparison_results.csv")
-    PLOTS_PATH = os.path.join(STORAGE_PATH, "/plots/main_method")
+    PLOTS_PATH = os.path.join(STORAGE_PATH, "plots", "main_method")
 
     os.makedirs(PLOTS_PATH, exist_ok=True)
 

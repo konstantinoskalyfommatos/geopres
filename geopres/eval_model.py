@@ -1,15 +1,24 @@
-from argparse import ArgumentParser
-import sys
-import torch
-import torch.nn as nn
-import os
+"""Evaluate a trained GeoPres projection on MTEB and on intrinsic metrics.
+
+    geopres-eval --backbone_model jinaai/jina-embeddings-v2-small-en --target_dim 32
+"""
+
 import logging
-import json
+import os
+import sys
+from argparse import ArgumentParser
 
-from config import TRAINED_MODELS_PATH, EVALUATION_RESULTS_PATH, parse_dtype
-from reduced_sentence_transformer import ReducedSentenceTransformer
-from eval_utils import evaluate_mteb, eval_intrinsic, find_checkpoint_lowest_val_loss
+import torch
 
+from geopres.config import (
+    EVALUATION_RESULTS_PATH,
+    TRAINED_MODELS_PATH,
+    default_device,
+    parse_dtype,
+)
+from geopres.eval_utils import eval_intrinsic, evaluate_mteb, find_checkpoint_lowest_val_loss
+from geopres.projection import LinearProjection
+from geopres.reduced_sentence_transformer import ReducedSentenceTransformer
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
@@ -18,8 +27,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-if __name__ == "__main__":
-    parser = ArgumentParser(description="Evaluate a reduced SentenceTransformer model on MTEB and intrinsic metrics")
+def main() -> None:
+    parser = ArgumentParser(
+        description="Evaluate a reduced SentenceTransformer model on MTEB and intrinsic metrics"
+    )
     parser.add_argument("--backbone_model", type=str, default="jinaai/jina-embeddings-v2-small-en", help="Name or path of the backbone SentenceTransformer model")
     parser.add_argument("--source_dim", default=512, type=int)
     parser.add_argument("--target_dim", type=int, default=32, help="Target dimension of the reduced embeddings")
@@ -45,25 +56,13 @@ if __name__ == "__main__":
     parser.add_argument("--spearman", action="store_true", help="Differentiable Spearman correlation loss")
     parser.add_argument("--spearman_local_or_global", type=str, default="local", choices=["local", "global"], help="Whether to compute Spearman loss using local (only pairs in the same batch) or global (all pairs in the dataset) similarities")
     parser.add_argument("--backbone_dtype", type=str, default=None, help="dtype for backbone model (e.g., float16, bfloat16)")
+    parser.add_argument("--device", type=str, default=None, help="cuda / cpu (default: cuda if available)")
 
     args = parser.parse_args()
     logger.info(f"Args: {args}")
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
-        )
-
-    dtype = None
-    if args.backbone_dtype:
-        dtype = parse_dtype(args.backbone_dtype)
-
-
-    projection_head = nn.Linear(
-        args.source_dim, 
-        args.target_dim,
-        bias=False
-    ).to("cuda")
+    device = args.device or default_device()
+    dtype = parse_dtype(args.backbone_dtype) if args.backbone_dtype else None
 
     if args.spearman:
         model_name = (
@@ -96,9 +95,9 @@ if __name__ == "__main__":
 
     best_model_path = os.path.join(trained_path, "best_model.pt")
     logger.info(f"Loading best model from: {best_model_path}")
-    projection_head.load_state_dict(
-        torch.load(best_model_path, map_location="cuda", weights_only=True)
-    )
+    projection_head = LinearProjection.load(
+        best_model_path, source_dim=args.source_dim, dim=args.target_dim, map_location=device
+    ).to(device)
     projection_head.eval()
 
     # Intrinsic evaluation
@@ -123,6 +122,7 @@ if __name__ == "__main__":
         output_dim=args.target_dim,
         custom_model_name=model_name,
         dtype=dtype,
+        device=device,
     )
     custom_model.eval()
 
@@ -140,3 +140,7 @@ if __name__ == "__main__":
         fast_mode=args.fast_mode,
         overwrite_cache=args.overwrite_cache,
     )
+
+
+if __name__ == "__main__":
+    main()

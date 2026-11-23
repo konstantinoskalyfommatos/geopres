@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import glob
 from matplotlib.patches import Patch
-from config import EVALUATION_RESULTS_PATH, STORAGE_PATH
+from geopres.config import EVALUATION_RESULTS_PATH, STORAGE_PATH
 
 
 def extract_embedding_dim(model_name):

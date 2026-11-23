@@ -1,8 +1,50 @@
-from dotenv import load_dotenv
+"""Paths and dtypes used by the research pipeline.
+
+All artefacts live under ``<repository>/storage``::
+
+    storage/
+    |-- precalculated_embeddings/
+    |-- trained_models/
+    |-- trained_autoencoders/
+    `-- evaluation_results/
+
+The library API (``from geopres import GeoPres``) does not use any of this;
+it is only needed by the training and evaluation scripts.
+"""
+
 import os
+from pathlib import Path
+
 import torch
 
-load_dotenv(override=True)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+STORAGE_PATH = str(PROJECT_ROOT / "storage")
+EVALUATION_RESULTS_PATH = os.path.join(STORAGE_PATH, "evaluation_results")
+TRAINED_MODELS_PATH = os.path.join(STORAGE_PATH, "trained_models")
+TRAINED_AUTOENCODERS_PATH = os.path.join(STORAGE_PATH, "trained_autoencoders")
+
+PRECALCULATED_EMBEDDINGS_PATH = os.path.join(STORAGE_PATH, "precalculated_embeddings")
+
+
+def embeddings_file(dataset: str, backbone: str, split: str) -> str:
+    """Path of one cached embedding tensor.
+
+    Example: ``embeddings_file("c4", "jinaai/jina-embeddings-v2-small-en", "train")``
+    -> ``$STORAGE_PATH/precalculated_embeddings/c4/jinaai__jina-embeddings-v2-small-en/train_embeddings.pt``
+    """
+    return os.path.join(
+        PRECALCULATED_EMBEDDINGS_PATH,
+        dataset.split("/")[-1],
+        backbone.replace("/", "__"),
+        f"{split}_embeddings.pt",
+    )
+
+
+def default_device() -> str:
+    """``"cuda"`` if a GPU is visible, otherwise ``"cpu"``."""
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
 
 DTYPE_ALIASES = {
     "fp16": "float16",
@@ -35,44 +77,3 @@ def parse_dtype(dtype_str: str) -> torch.dtype:
             f"Supported: {', '.join(sorted(set(DTYPE_ALIASES.values())))}"
         )
     return dtype
-
-
-PROJECT_ROOT = os.getenv("PROJECT_ROOT")
-if not PROJECT_ROOT:
-    raise ValueError("PROJECT_ROOT environment variable not set")
-
-
-STORAGE_PATH = os.getenv(
-    "STORAGE_PATH",
-    os.path.join(PROJECT_ROOT, "storage")
-)
-
-
-EVALUATION_RESULTS_PATH = os.getenv(
-    "EVALUATION_RESULTS_PATH",
-    os.path.join(
-        PROJECT_ROOT,
-        "storage",
-        "evaluation_results"
-    )
-)
-
-
-TRAINED_MODELS_PATH = os.getenv(
-    "TRAINED_MODELS_PATH",
-    os.path.join(
-        PROJECT_ROOT,
-        "storage",
-        "trained_models"
-    )
-)
-
-
-TRAINED_AUTOENCODERS_PATH = os.getenv(
-    "TRAINED_AUTOENCODERS_PATH",
-    os.path.join(
-        PROJECT_ROOT,
-        "storage",
-        "trained_autoencoders"
-    )
-)

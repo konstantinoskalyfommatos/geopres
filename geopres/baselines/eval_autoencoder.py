@@ -4,10 +4,10 @@ import torch
 import os
 import logging
 
-from config import TRAINED_AUTOENCODERS_PATH, EVALUATION_RESULTS_PATH, parse_dtype
-from reduced_sentence_transformer import ReducedSentenceTransformer
-from eval_utils import evaluate_mteb, eval_intrinsic
-from baselines.train_autoencoder import Autoencoder
+from geopres.config import TRAINED_AUTOENCODERS_PATH, EVALUATION_RESULTS_PATH, default_device, parse_dtype
+from geopres.reduced_sentence_transformer import ReducedSentenceTransformer
+from geopres.eval_utils import evaluate_mteb, eval_intrinsic
+from geopres.baselines.train_autoencoder import Autoencoder
 
 
 # Set random seed for reproducibility
@@ -44,9 +44,7 @@ if __name__ == "__main__":
     logger.info(f"Args: {args}")
 
     if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
-        )
+        logger.warning("CUDA is not available, falling back to CPU (this will be slow).")
 
     dtype = None
     if args.backbone_dtype:
@@ -55,7 +53,7 @@ if __name__ == "__main__":
     autoencoder = Autoencoder(
         input_dim=args.source_dim,
         latent_dim=args.target_dim,
-    ).to("cuda")
+    ).to(default_device())
 
     model_name = (
         f"{args.backbone_model}"
@@ -78,7 +76,7 @@ if __name__ == "__main__":
     best_model_path = os.path.join(trained_path, "best_model.pt")
     logger.info(f"Loading best model from: {best_model_path}")
     autoencoder.load_state_dict(
-        torch.load(best_model_path, map_location="cuda", weights_only=True)
+        torch.load(best_model_path, map_location=default_device(), weights_only=True)
     )
     autoencoder.eval()
 

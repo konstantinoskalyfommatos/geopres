@@ -1,124 +1,321 @@
 # GeoPres
-Official implementation of GeoPres.
 
-# Formal Research Problem
-Given a function $g: X \to Y \subseteq \mathbb{R}^n$, where $X$ is an arbitrary set and $n$ is large, and given $k < n$, we are interested in a function $f^*: Y \to \mathbb{R}^k$, with the property that downstream task performance achieved by $f^* \circ g$ closely matches that of $g$. With such a function, for any $x \in X$, the embedding $f^*(g(x)) \in \mathbb{R}^k$ serves as a low-dimensional representative of $g(x) \in \mathbb{R}^n$, significantly reducing computational cost without substantial loss in task performance.
+GeoPres compresses high-dimensional text embeddings with a **single linear map**
+that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
+embedding model stays frozen, and at inference time the whole "reduction" is one
+matrix multiply. The method is described in our [**EACL paper: "On Post-Hoc Dimensionality Reduction of Text Embeddings"**](https://openreview.net/forum?id=vAWo3CIzqp).
 
-**Note:** In the present context, $g$ is an embedding model, $X$ is a set of sentences, and $g$ maps these sentences into a vector space.
+This repository contains features two parts:
 
-# Idea
-Our approach is straightforward: we generate a large collection of high-dimensional vectors using $g$, which serve as training data to approximate $f^*$ with a linear model $f(y) = W y$, optimized via backpropagation using a distance-preserving loss function. This approach rests on two assumptions: first, that a linear function with the desired properties exists; and second, that preserving intrinsic properties for a large set of vectors in the image of $g$ is predictive of downstream task performance.
+1. **`geopres`, a small library** — train a projection on your own embeddings,
+   save it, reload it, and use it on new text (no GPU required).
+2. **The paper's experimental pipeline** — pre-encode 10M C4 passages, train,
+   run MTEB, compare against PCA / random projection / random selection /
+   truncation / autoencoder baselines, and rebuild the paper's tables and plots.
 
-# Loss Function
-We optimize $f$ by minimizing a pairwise distance preservation loss. Formally, let $\mathcal{B} = \{y_1, y_2, \dots, y_m\} \subseteq \mathbb{R}^n$ be a training batch. For $y_i, y_j \in \mathcal{B}$, let $d_{i,j}$ denote the Euclidean distance between $y_i$ and $y_j$, and let $d_{i,j}^{f}$ denote the Euclidean distance between $f(y_i)$ and $f(y_j)$. The loss is defined as
+---
 
-$$\mathcal{L} = \frac{1}{\binom{m}{2}} \sum_{i < j}\left( d_{i,j} - d_{i,j}^{f} \right)^2.$$
+## Install
 
-# Implementation
-## Training Setup
-- **Training data**: 10 million English-only text passages sampled from the Colossal Clean Crawled Corpus (C4).
-- **Optimizer**: AdamW with learning rate $10^{-2}$ and weight decay $0.1$.
-- **Batch size**: 20,000 points.
-- **Scheduler**: Linear learning rate scheduler with warmup ratio of $0.1$.
-- **Epochs**: 10, with early stopping (patience of 3 evaluation steps).
-- **Validation**: 10,000 paraphrase pairs (20,000 data points) from `agentlans/sentence-paraphrases`.
-
-# Prerequisites
-```bash
-uv sync
-```
-
-Then, create a `.env` file in the project root directory from `.env.example` (edit paths to absolute values; `PROJECT_ROOT` is required):
+Python 3.12 is required.
 
 ```bash
-cp .env.example .env
+git clone https://github.com/konstantinoskalyfommatos/geopres
+cd geopres
+
+# recommended: uv, exactly how the paper runs were made
+uv sync --extra research                     # package + paper dependencies
+uv sync --extra research --extra spearman    # ... plus torchsort, for --spearman
+
+# or with plain pip
+pip install -e .                             # library only (torch + sentence-transformers)
+pip install -e ".[research]"                 # + datasets, mteb, matplotlib, ...
+pip install -e ".[spearman]"                 # + torchsort, only for the --spearman loss
 ```
 
-## Environment Configuration
+`torchsort` is not installed by default because it has to be compiled against
+your CUDA toolchain; see [Common issues](#common-issues).
 
-To ensure the project modules are accessible, set the `PYTHONPATH` to include the `geopres` directory:
+> **PyPI.** The package metadata is release-ready (`uv build` produces a wheel
+> and an sdist), so `pip install geopres` will work as soon as the first release
+> is uploaded.
+
+---
+
+## Quick start (library)
+
+Fitting a dimension-reduced embedding model:
+
+```python
+from geopres import GeoPres
+
+model = GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32)
+model.fit(texts)                       # texts: list[str]
+reduced = model.embed(texts)           # numpy array, shape (len(texts), 32)
+
+model.save("geopres-mpnet-32")
+``` 
+
+Note that `fit` also accepts embeddings you already have, which allows much cheaper training:
+
+```python
+import torch
+from geopres import GeoPres
+
+embeddings = torch.load("my_embeddings.pt")        # (n, 768)
+model = GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32)
+model.fit(embeddings)                              # no encoding, just the projection
+reduced = model.embed(embeddings)                  # (n, 32)
+```
+
+Load a trained projection and use it on new text:
+
+```python
+from geopres import GeoPres
+
+model = GeoPres.load_path("geopres-mpnet-32")       # backbone id comes from config.json
+reduced = model.embed(["a sentence I have never seen before"])
+```
+
+The projection is a plain matrix, therefore it can be applied on embeddings
+created elsewhere (e.g. Hugging Face's
+[TEI](https://huggingface.co/docs/text-embeddings-inference)), as long as the
+underlying vector-generator function (e.g. embedding model) is the same during
+training and inference. "Same" includes the pooling, the normalisation and, for
+instruction-based models such as Qwen3-Embedding, the same query/passage
+prefixes.
+
+`Projection` is the API for exactly that: the matrix and nothing else. No
+backbone is loaded, downloaded or needed.
+
+```python
+from geopres import Projection
+
+projection = Projection.load_path("geopres-mpnet-32")
+# or: Projection.from_pretrained("kkalyfo/geopres-mpnet-32")
+projection.source_dim, projection.dim                # (768, 32)
+
+# any vector from the same embedding model: TEI, a vector DB, another service
+vector = get_embedding(embedding_model_name="sentence-transformers/all-mpnet-base-v2")
+reduced = projection.project(vector)                # (32,)
+
+vectors = ...                                       # (1000, 768)
+reduced = projection.project(vectors)               # (1000, 32)
+```
+
+If you would rather not depend on `geopres` at inference time, the matrix is
+just `projection.weight`, of shape `(dim, source_dim)`: one `vectors @ weight.T`.
+It is read-only, so a trained projection cannot be changed by accident.
+
+Numpy in, numpy out; a tensor in, a tensor out on the same device and dtype.
+Vectors that already live on a GPU are therefore never copied to the host:
+
+```python
+vectors = torch.load("gpu_embeddings.pt").cuda()     # stays on the GPU
+reduced = projection.project(vectors)                # torch.Tensor, cuda
+
+projection.to_torch(device="cuda")                   # frozen nn.Linear, e.g. for torch.compile / ONNX
+```
+
+The projection is one `768 x 32` matrix, so it is memory-bound: on CPU it costs
+about the same as the copy it would take to move the vectors to a GPU. Keep it
+on whichever device already holds the vectors.
+
+Upload your own projection, or load one from the Hub:
+
+```python
+model.push_to_hub("kkalyfo/geopres-mpnet-32")     # config + weights + model card
+
+from geopres import GeoPres
+model = GeoPres.from_pretrained("kkalyfo/geopres-mpnet-32")
+reduced = model.embed(["a sentence I have never seen before"])
+```
+
+Trained projections released with the paper live under
+[huggingface.co/kkalyfo](https://huggingface.co/kkalyfo).
+
+### API summary
+
+| Call | What it does |
+| --- | --- |
+| `GeoPres(model, dim=32)` | `model` is a sentence-transformers id, a loaded `SentenceTransformer`, or `None` (embeddings only). |
+| `.fit(data, ...)` | Train on texts or on an `(n, source_dim)` array/tensor. Returns `self`. |
+| `.embed(data, ...)` | Project texts or embeddings to `dim`. Returns `(n, dim)` numpy by default, `(dim,)` for a single vector. |
+| `.save(path)` | Writes `config.json` + `projection.safetensors`. |
+| `GeoPres.load_path(path)` | Reloads a saved directory (or a bare `.pt` / `.safetensors` weight file). |
+| `.to_sentence_transformer()` | Backbone + projection as a `SentenceTransformer`, e.g. for MTEB. |
+| `.push_to_hub(repo_id, private=False)` | Upload `config.json`, weights and a model card to the HF Hub. |
+| `GeoPres.from_pretrained(repo_id)` | Download and load a projection from the HF Hub. |
+| `Projection.load_path(path)` / `.from_pretrained(repo_id)` | The projection alone, for embeddings you already have. `.project(vectors)`, no backbone. `.to_torch()` for the `nn.Module`. |
+
+`fit` defaults follow the paper (10 epochs, AdamW, lr 1e-2, weight decay 0.1,
+linear warmup 0.1, early stopping patience 3, batch size 20 000). Batch size is
+a hyperparameter, not only a memory setting: the loss compares all pairs inside
+a batch, so a smaller batch trains on a different signal.
+
+Data size matters less than batch size. The paper trained on 10M passages
+because more data kept helping, but a few hundred thousand text samples are
+enough to get a good projection (see [Data](#reproducing-the-paper)).
+
+---
+
+## Reproducing the paper
+
+The pipeline is **precalculate → train → evaluate → collect**.
 
 ```bash
-export PYTHONPATH="$(pwd)/geopres:$PYTHONPATH"
+# 0) environment
+uv sync --extra research
+
+# 1) pre-encode the corpora with a backbone (one-time per backbone, GPU, slow)
+uv run geopres-precalculate \
+    --model_name jinaai/jina-embeddings-v2-small-en \
+    --train --val_test --batch_size 8192
+
+# 2) train the projection
+uv run geopres-train \
+    --backbone_model jinaai/jina-embeddings-v2-small-en \
+    --source_dim 512 --target_dim 32 \
+    --train_batch_size 20000 --val_batch_size 20000 \
+    --positional_loss_factor 1 --weighted_loss
+
+# 3) evaluate on MTEB (this is also run automatically at the end of step 2)
+uv run geopres-eval --backbone_model jinaai/jina-embeddings-v2-small-en --source_dim 512 --target_dim 32
+
+# 4) merge all MTEB caches into one CSV
+uv run geopres-compare
 ```
 
-For a persistent setup, add this to your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`):
+Everything is also runnable as a module (`python -m geopres.train_model ...`)
+if you prefer not to use the console scripts.
+
+**Data.** Step 1 uses `allenai/c4` (`en` split, 10M passages longer than 200
+words) for training and `agentlans/sentence-paraphrases` for validation/test.
+No dataset is downloaded by the library; only step 1 needs the `datasets`
+package.
+
+We used 10M training samples because results kept improving as we added more
+data, but this is not a requirement: a few hundred thousand text samples are
+already enough for a good projection, and they make the one-time encoding step
+much cheaper. Pass `--max_train_examples` to cap the training set.
+
+**Baselines** read the same cached embeddings:
 
 ```bash
-echo 'export PYTHONPATH="$(pwd)/geopres:$PYTHONPATH"' >> ~/.bashrc
-source ~/.bashrc
+uv run python -m geopres.baselines.fit_pca --model_name <backbone> --target_dim 32
+uv run python -m geopres.baselines.eval_pca --backbone_model <backbone> --target_dim 32
+uv run python -m geopres.baselines.train_autoencoder --backbone_model <backbone> --target_dim 32
+# ... eval_random_projection, eval_random_selection, eval_truncation
 ```
 
-# Project Structure
+**Tables and plots.** `analysis/` contains the scripts that regenerate the
+paper's figures, LaTeX tables and bootstrap tests from the cached results. They
+are not part of the installed package, e.g.
+`uv run python analysis/create_scatter_plot.py`.
+
+### Where files go
+
+Everything lands under `storage/` in the repository:
+
+```
+storage/
+├── precalculated_embeddings/<dataset>/<backbone>/{train,validation,test}_embeddings.pt
+├── trained_models/<backbone>/<model_name>/checkpoint-N/ + best_model.pt
+├── trained_autoencoders/<backbone>/<model_name>/...
+├── pca/<backbone>/<target_dim>/
+└── evaluation_results/{backbone,trained_models,autoencoders}/...
+```
+
+`HF_TOKEN` is picked up from the environment by `huggingface_hub` if you need
+gated datasets.
+
+---
+
+## Repository layout
 
 ```
 geopres/
-├── config.py                          # .env loader + path/dtype helpers (PROJECT_ROOT, STORAGE_PATH, …)
-├── precalculate_embeddings.py         # one-time per backbone: encode C4 / sentence-paraphrases, dump .pt
-├── train_model.py                     # main entry: trains the GeoPres linear projection (HF Trainer)
-├── eval_backbone.py                   # MTEB eval of a raw backbone (no projection), for reference
-├── eval_model.py                      # MTEB eval of a trained projection model from a checkpoint
-├── eval_utils.py                      # shared MTEB runner + intrinsic metrics (angular/positional/Spearman)
-├── geopres_trainer.py                 # HF Trainer subclass implementing the pairwise distance loss
-├── reduced_sentence_transformer.py    # SentenceTransformer wrapper that applies the learned linear W
-├── baselines/                         # alternative compression methods, all read the same precalculated .pt
-│   ├── fit_pca.py                     # fit PCA on precalculated embeddings → projection matrix
-│   ├── eval_pca.py                    # MTEB eval of PCA-projected embeddings
-│   ├── eval_random_projection.py      # random linear projection baseline
-│   ├── eval_random_selection.py       # random coordinate-selection baseline
-│   ├── eval_truncation.py             # coordinate truncation baseline
-│   ├── train_autoencoder.py           # train a nonlinear autoencoder baseline
-│   └── eval_autoencoder.py            # MTEB eval of the trained autoencoder
-└── scripts/                           # post-hoc analysis & reporting
-    └── compare_evaluation_results.py  # the ONLY essential script here; merges MTEB caches into
-                                        # $EVALUATION_RESULTS_PATH/comparison_results.csv
+├── api.py                          # public API: GeoPres (fit / embed / save) and Projection
+├── projection.py                   # the linear map W (a bias-free nn.Linear)
+├── losses.py                       # positional / angular / Spearman losses
+├── encode.py                       # loading a backbone and encoding text
+├── config.py                       # paths + dtype helpers
+├── train_model.py                  # paper training entry point (HF Trainer)
+├── geopres_trainer.py              # HF Trainer subclass with the pairwise loss
+├── reduced_sentence_transformer.py # backbone + projection as a SentenceTransformer
+├── precalculate_embeddings.py      # one-time encoding of C4 / sentence-paraphrases
+├── eval_model.py                   # MTEB + intrinsic eval of a trained projection
+├── eval_backbone.py                # MTEB eval of the raw backbone (reference point)
+├── eval_utils.py                   # shared MTEB runner and intrinsic metrics
+├── compare_results.py              # merges MTEB caches into comparison_results.csv
+├── py.typed                        # this package ships type hints
+└── baselines/                      # PCA, random projection, random selection, truncation, autoencoder
+analysis/                           # paper tables, plots, bootstrap tests (not shipped)
+tests/                              # pytest: API, persistence, losses, hub (no GPU, no network)
 ```
 
-The pipeline is **precalculate → train → evaluate**:
+---
 
-1. `precalculate_embeddings.py` encodes the C4 training corpus and the
-   `agentlans/sentence-paraphrases` validation/test splits with the chosen backbone
-   and dumps tensors to `$STORAGE_PATH/precalculated_embeddings/`.
-2. `train_model.py` (and `baselines/train_autoencoder.py` for the nonlinear baseline)
-   train a projection on those cached embeddings. `baselines/eval_*.py` /
-   `baselines/fit_pca.py` produce PCA / random-projection / random-selection /
-   truncation results the same way.
-3. `eval_model.py` and `eval_backbone.py` run each trained model / raw backbone on
-   MTEB through `eval_utils.evaluate_mteb`, which caches results under
-   `$EVALUATION_RESULTS_PATH/`.
-4. `scripts/compare_evaluation_results.py` is the only required post-processing
-    step — it walks those MTEB caches and writes a single
-    `comparison_results.csv` (one row per backbone × method × task). All other
-    files under `geopres/scripts/` are exploratory LaTeX-table / plotting generators
-    and are not part of the core pipeline.
+## Common issues
 
-The end-to-end CLI recipes live in `AGENTS.md` under "Workflow: precalculate → train → evaluate".
+### `torchsort` fails to install or build
 
-# Common Issues
-
-## torchsort fails to install or build
-
-The default `uv sync` installs `torchsort` from PyPI, which requires the CUDA toolchain to build from source. If the build fails (e.g., no CUDA runtime, unsupported platform), you can install a pre-built wheel manually from the [torchsort GitHub releases](https://github.com/teddykoker/torchsort/releases):
+`torchsort` is only needed for `--spearman`. It builds from source, so it needs
+a CUDA toolchain. If that fails, install a pre-built wheel from the
+[torchsort releases](https://github.com/teddykoker/torchsort/releases):
 
 ```bash
-# torchsort version, supports >= 0.1.10
 export TORCHSORT=0.1.10
-# PyTorch version, supports pt26, pt25, pt24, pt21, pt20, and pt113 for versions
-# 2.6, 2.5, 2.4, 2.1, 2.0, and 1.13 respectively
-export TORCH=pt26
-# CUDA version, supports cpu, cu113, cu117, cu118, cu121, cu124, and cu126 for
-# CPU-only, CUDA 11.3, CUDA 11.7, CUDA 11.8, CUDA 12.1, CUDA 12.4, and CUDA 12.6
-# respectively
-export CUDA=cu126
-# Python version, supports cp310, cp311, and cp312 for versions 3.10, 3.11, and
-# 3.12 respectively
-export PYTHON=cp312
+export TORCH=pt26      # your torch version: pt26, pt25, pt24, pt21, pt20, pt113
+export CUDA=cu126      # cpu, cu113, cu117, cu118, cu121, cu124, cu126
+export PYTHON=cp312    # cp310, cp311, cp312
 
 uv pip install https://github.com/teddykoker/torchsort/releases/download/v${TORCHSORT}/torchsort-${TORCHSORT}+${TORCH}${CUDA}-${PYTHON}-${PYTHON}-linux_x86_64.whl
 ```
 
-Adjust the variables above to match your PyTorch version, CUDA version, and Python version. Pre-built wheels are currently available on Linux only.
+### `Alibaba-NLP/gte-multilingual-base` (mGTE) breaks with newer transformers
 
-## Alibaba-NLP/gte-multilingual-base model breaks with newer Transformers versions
+The paper's environment pins `transformers==4.57.6`. Newer versions break mGTE
+at encode time. If you change the pin, re-test mGTE.
 
-This project pins `transformers==4.57.6` for a reason. Upgrading to a more recent version causes issues with the mGTE model. If you override this pin, expect runtime errors when encoding with mGTE.
+### Out of memory during training
+
+Memory is dominated by the pairwise loss, which compares every pair of
+embeddings in a batch, so it grows quadratically with the batch size. The paper
+trains with `--train_batch_size 20000`, and that is the configuration the
+reported numbers come from: keep it if you want comparable results.
+
+Shrinking the batch is not a free fix. Fewer pairs per step means a different
+training signal, so a smaller batch produces a different model, not the same
+model on less memory. If 20000 does not fit on your GPU, treat the smaller batch
+as a new configuration and re-check the intrinsic validation loss (ideally also
+a task or two) instead of assuming the published numbers carry over.
+
+---
+
+## Development
+
+```bash
+uv sync --extra research
+uv run pytest            # fast, CPU-only, no downloads
+```
+
+## Citation
+
+```bibtex
+@inproceedings{kalyfommatos2027geopres,
+  title     = {On Post-Hoc Dimensionality Reduction of Text Embeddings},
+  author    = {Kalyfommatos, Konstantinos and Michail, Andrianos and Huber, Marius
+               and Psomas, Bill and Clematide, Simon and Opitz, Juri},
+  booktitle = {Proceedings of the 2027 Conference of the European Chapter of the
+               Association for Computational Linguistics (EACL 2027)},
+  year      = {2027},
+  url       = {https://openreview.net/forum?id=vAWo3CIzqp}
+}
+```
+
+See also [`CITATION.cff`](https://github.com/konstantinoskalyfommatos/geopres/blob/main/CITATION.cff).
+
+## License
+
+MIT — see [`LICENSE`](https://github.com/konstantinoskalyfommatos/geopres/blob/main/LICENSE).

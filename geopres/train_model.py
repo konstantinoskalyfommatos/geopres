@@ -6,16 +6,23 @@ import logging
 from typing import Any
 import time
 
-import torch.nn as nn
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset
 
 from transformers import TrainingArguments, EarlyStoppingCallback
 
-from reduced_sentence_transformer import ReducedSentenceTransformer
-from geopres_trainer import GeoPresTrainer, EmbeddingsDataset
-from config import TRAINED_MODELS_PATH, EVALUATION_RESULTS_PATH, STORAGE_PATH, parse_dtype
-from eval_utils import evaluate_mteb, eval_intrinsic, find_checkpoint_lowest_val_loss
+from geopres.config import (
+    EVALUATION_RESULTS_PATH,
+    TRAINED_MODELS_PATH,
+    default_device,
+    embeddings_file,
+    parse_dtype,
+)
+from geopres.eval_utils import evaluate_mteb, eval_intrinsic, find_checkpoint_lowest_val_loss
+from geopres.geopres_trainer import EmbeddingsDataset, GeoPresTrainer
+from geopres.projection import LinearProjection
+from geopres.reduced_sentence_transformer import ReducedSentenceTransformer
 
 
 # Setup logging
@@ -58,6 +65,7 @@ def train_model(
     clustering_batch_size: int = 16,
     overwrite_cache: bool = False,
     dtype: torch.dtype | None = None,
+    device: str | None = None,
 ) -> None:
     before = time.perf_counter()
 
@@ -157,6 +165,7 @@ def train_model(
         output_dim=target_dim,
         custom_model_name=custom_model_name,
         dtype=dtype,
+        device=device,
     )
     sentence_transformer.eval()
 
@@ -228,6 +237,7 @@ def main():
     parser.add_argument("--clustering_batch_size", type=int, default=16, help="Batch size for clustering evaluation")
 
     parser.add_argument("--backbone_dtype", type=str, default=None, help="dtype for backbone model (e.g., float16, bfloat16)")
+    parser.add_argument("--device", type=str, default=None, help="cuda / cpu (default: cuda if available)")
 
     # Output configuration
     parser.add_argument("--custom_suffix", type=str, default=None, help="Will be added to the normal model name")
@@ -235,9 +245,11 @@ def main():
 
     args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
+    device = args.device or default_device()
+    if device == "cpu":
+        logger.warning(
+            "Training on CPU. This is fine for small embedding sets, but the "
+            "paper configuration (10M embeddings, batch size 20000) needs a GPU."
         )
 
     dtype = None
@@ -286,22 +298,14 @@ def main():
             # No checkpoint found, start from scratch
             pass
 
-    trainable_projection = nn.Linear(
-        args.source_dim, 
+    trainable_projection = LinearProjection(
+        args.source_dim,
         args.target_dim,
-        bias=False,
-        device="cuda"
-    )
+    ).to(device)
     
     logger.info("Preparing datasets")
     # Load the precalculated training embeddings
-    train_tensor_path = os.path.join(
-        STORAGE_PATH,
-        "precalculated_embeddings",
-        "c4",
-        args.backbone_model.replace("/", "__"),
-        "train_embeddings.pt"
-    )
+    train_tensor_path = embeddings_file("c4", args.backbone_model, "train")
     if not os.path.exists(train_tensor_path):
         raise FileNotFoundError(
             f"Precalculated embeddings not found at {train_tensor_path}"
@@ -311,13 +315,7 @@ def main():
     )
 
     # Load the precalculated validation embeddings
-    val_tensor_path = os.path.join(
-        STORAGE_PATH,
-        "precalculated_embeddings",
-        "sentence-paraphrases",
-        args.backbone_model.replace("/", "__"),
-        "validation_embeddings.pt"
-    )
+    val_tensor_path = embeddings_file("sentence-paraphrases", args.backbone_model, "validation")
     if not os.path.exists(val_tensor_path):
         raise FileNotFoundError(
             f"Precalculated embeddings not found at {val_tensor_path}"
@@ -364,6 +362,7 @@ def main():
         clustering_batch_size=args.clustering_batch_size,
         overwrite_cache=args.overwrite_cache,
         dtype=dtype,
+        device=device,
     )
 
 

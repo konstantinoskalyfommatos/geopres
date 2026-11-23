@@ -1,16 +1,40 @@
-from sentence_transformers import SentenceTransformer
-import torch
-import os
-import mteb
-from mteb.cache import ResultCache
-import logging
+"""MTEB and intrinsic evaluation helpers.
+
+The loss functions live in :mod:`geopres.losses` and are re-exported here so
+that existing imports keep working.
+"""
+
 import json
-import torchsort
+import logging
+import os
 
+import mteb
+import torch
 from huggingface_hub import login
+from mteb.cache import ResultCache
+from sentence_transformers import SentenceTransformer
 
-from config import STORAGE_PATH
+from geopres.config import embeddings_file, default_device
+from geopres.losses import (
+    compute_angular_loss,
+    compute_positional_loss,
+    compute_spearman_loss,
+    geopres_loss,
+)
 
+__all__ = [
+    "compute_angular_loss",
+    "compute_positional_loss",
+    "compute_spearman_loss",
+    "geopres_loss",
+    "eval_intrinsic",
+    "evaluate_mteb",
+    "evaluate_sts",
+    "evaluate_retrieval",
+    "evaluate_classification",
+    "evaluate_clustering",
+    "find_checkpoint_lowest_val_loss",
+]
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
@@ -21,11 +45,13 @@ logger = logging.getLogger(__name__)
 logging.getLogger("ignite.engine.engine.Engine").setLevel(logging.WARNING)
 
 
-try:
-    if hf_token := os.getenv("HF_TOKEN"):
-        login(token=hf_token)
-except Exception as e:
-    logger.warning(f"Could not log in to Hugging Face Hub: {e}")
+def login_if_token_available() -> None:
+    """Log in to the Hugging Face Hub if ``HF_TOKEN`` is set (gated datasets)."""
+    try:
+        if hf_token := os.getenv("HF_TOKEN"):
+            login(token=hf_token)
+    except Exception as e:
+        logger.warning(f"Could not log in to Hugging Face Hub: {e}")
 
 
 def find_checkpoint_lowest_val_loss(trained_path: str) -> tuple[float, int]:
@@ -63,180 +89,6 @@ def find_checkpoint_lowest_val_loss(trained_path: str) -> tuple[float, int]:
     return lowest_val, best_checkpoint
 
 
-def compute_positional_loss(
-    low_dim_embeddings: torch.Tensor,
-    high_dim_embeddings: torch.Tensor,
-    weighted: bool = False,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """Compute weighted pairwise distance preservation loss.
-
-    L = (1 / n) * sum_{i<j} w_ij * (d_low(x_i, x_j) - d_high(x_i, x_j))^2
-    where w_ij = 1 / (d_high(x_i, x_j) + eps)^m
-    """
-    low_dim_dist = torch.cdist(low_dim_embeddings, low_dim_embeddings, p=2)
-    high_dim_dist = torch.cdist(high_dim_embeddings, high_dim_embeddings, p=2)
-
-    n = low_dim_dist.size(0)
-    triu_indices = torch.triu_indices(
-        n, n, offset=1, device=low_dim_embeddings.device
-    )
-
-    low_d = low_dim_dist[triu_indices[0], triu_indices[1]]
-    high_d = high_dim_dist[triu_indices[0], triu_indices[1]]
-
-    if not weighted:
-        loss = (low_d - high_d).pow(2).mean()
-    else:
-        weights = 1.0 / (high_d + eps)
-        loss = (weights * (low_d - high_d).pow(2)).mean()
-
-    return loss
-
-
-def compute_angular_loss(
-    low_dim_embeddings: torch.Tensor, 
-    high_dim_embeddings: torch.Tensor,
-    weighted: bool,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """Compute pairwise cosine similarity preservation loss."""
-    # Normalize embeddings to unit vectors
-    low_dim_embeddings = torch.nn.functional.normalize(low_dim_embeddings, p=2, dim=1)
-    high_dim_embeddings = torch.nn.functional.normalize(high_dim_embeddings, p=2, dim=1)
-    
-    # Compute similarity matrices
-    low_dim_sim = torch.mm(low_dim_embeddings, low_dim_embeddings.t())
-    high_dim_sim = torch.mm(high_dim_embeddings, high_dim_embeddings.t())
-    
-    # Use triu_indices for better memory efficiency
-    n = low_dim_sim.size(0)
-    triu_indices = torch.triu_indices(n, n, offset=1, device=low_dim_embeddings.device)
-    
-    low_dim_sim_upper = low_dim_sim[triu_indices[0], triu_indices[1]]
-    high_dim_sim_upper = high_dim_sim[triu_indices[0], triu_indices[1]]
-
-    if not weighted:
-        return (low_dim_sim_upper - high_dim_sim_upper).pow(2).mean()
-    
-    weights = 1.0 / (1.0 - high_dim_sim_upper + eps)
-    return (weights * (low_dim_sim_upper - high_dim_sim_upper).pow(2)).mean()
-
-
-# --- Spearman's rank ---
-def spearmanr_differentiable(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    weighted: bool = False,
-    **kw
-):
-    n = target.size(0)
-    triu_indices = torch.triu_indices(n, n, offset=1, device=target.device)
-    pred = pred[triu_indices[0], triu_indices[1]]
-    target = target[triu_indices[0], triu_indices[1]]
-    pred = pred.unsqueeze(0)
-    target = target.unsqueeze(0)
-
-    pred_ranks = torchsort.soft_rank(pred, **kw)
-    target_ranks = torchsort.soft_rank(target, **kw)
-    
-    if weighted:
-        # Normalize soft ranks to use as weights
-        weights = target_ranks / target_ranks.sum(dim=1, keepdim=True)
-        
-        # Weighted mean centering
-        w_sum = weights.sum(dim=1, keepdim=True)
-        pred_mean = (weights * pred_ranks).sum(dim=1, keepdim=True) / w_sum
-        target_mean = (weights * target_ranks).sum(dim=1, keepdim=True) / w_sum
-        
-        pred_centered = pred_ranks - pred_mean
-        target_centered = target_ranks - target_mean
-        
-        # Weighted covariance and variances
-        cov = (weights * pred_centered * target_centered).sum(dim=1)
-        pred_var = (weights * pred_centered ** 2).sum(dim=1)
-        target_var = (weights * target_centered ** 2).sum(dim=1)
-        
-        eps = 1e-8
-        correlation = cov / (torch.sqrt(pred_var * target_var) + eps)
-        return correlation.mean()
-    else:
-        pred_ranks = pred_ranks - pred_ranks.mean()
-        pred_ranks = pred_ranks / pred_ranks.norm()
-        target_ranks = target_ranks - target_ranks.mean()
-        target_ranks = target_ranks / target_ranks.norm()
-        return (pred_ranks * target_ranks).sum()
-
-
-def spearmanr_differentiable_local(
-    pred: torch.Tensor, 
-    target: torch.Tensor,
-    weighted: bool = False,
-    **kw
-) -> torch.Tensor:
-    """Differentiable Spearman correlation weighted by target rank position."""
-    n = pred.shape[0]
-    m = n - 1
-    
-    # Exclude diagonal
-    mask = ~torch.eye(n, dtype=torch.bool, device=pred.device)
-    pred_offdiag = pred[mask].reshape(n, m)
-    target_offdiag = target[mask].reshape(n, m)
-    
-    # Get soft ranks of target similarities (continuous approximations)
-    target_soft_ranks = torchsort.soft_rank(target_offdiag, **kw)
-    
-    if weighted:
-        # Normalize soft ranks to use as weights
-        weights = target_soft_ranks / target_soft_ranks.sum(dim=1, keepdim=True)
-    else:
-        weights = torch.ones_like(target_soft_ranks)
-
-    # Get ranks of predictions
-    pred_ranks = torchsort.soft_rank(pred_offdiag, **kw)
-    
-    # Weighted mean centering
-    w_sum = weights.sum(dim=1, keepdim=True)
-    pred_mean = (weights * pred_ranks).sum(dim=1, keepdim=True) / w_sum
-    target_mean = (weights * target_soft_ranks).sum(dim=1, keepdim=True) / w_sum
-    
-    pred_centered = pred_ranks - pred_mean
-    target_centered = target_soft_ranks - target_mean
-    
-    # Weighted covariance and variances
-    cov = (weights * pred_centered * target_centered).sum(dim=1)
-    pred_var = (weights * pred_centered ** 2).sum(dim=1)
-    target_var = (weights * target_centered ** 2).sum(dim=1)
-    
-    eps = 1e-8
-    row_correlations = cov / (torch.sqrt(pred_var * target_var) + eps)
-    
-    return row_correlations.mean()
-
-
-def compute_spearman_loss(
-    low_dim_embeddings: torch.Tensor,
-    high_dim_embeddings: torch.Tensor,
-    local_or_global: str = "local",
-    training: bool = False,
-    weighted: bool = False,
-) -> torch.Tensor | float:
-    """Compute Spearman correlation loss between low and high dimensional embeddings."""
-    # Normalize embeddings
-    low_dim_embeddings = torch.nn.functional.normalize(low_dim_embeddings, p=2, dim=1)
-    high_dim_embeddings = torch.nn.functional.normalize(high_dim_embeddings, p=2, dim=1)
-    
-    # Compute similarity matrices
-    low_dim_sim = torch.mm(low_dim_embeddings, low_dim_embeddings.t())
-    high_dim_sim = torch.mm(high_dim_embeddings, high_dim_embeddings.t())
-
-    with torch.set_grad_enabled(training):
-        if local_or_global == "local":
-            return 1.0 - spearmanr_differentiable_local(low_dim_sim, high_dim_sim, weighted=weighted)
-        else:
-            return 1.0 - spearmanr_differentiable(low_dim_sim, high_dim_sim, weighted=weighted)
-
-
 # --- Eval functions ---
 @torch.no_grad()
 def eval_intrinsic(
@@ -257,13 +109,7 @@ def eval_intrinsic(
         "positional_loss": None,
     }
 
-    test_embeddings_path = os.path.join(
-        STORAGE_PATH,
-        "precalculated_embeddings",
-        dataset_name.split("/")[-1],
-        backbone_model_path.replace("/", "__"),
-        "test_embeddings.pt"
-    )
+    test_embeddings_path = embeddings_file(dataset_name, backbone_model_path, "test")
     
     if not os.path.exists(test_embeddings_path):
         raise FileNotFoundError(
@@ -272,7 +118,7 @@ def eval_intrinsic(
     
     high_dim_embeddings: torch.Tensor = torch.load(
         test_embeddings_path, weights_only=True
-    ).to("cuda")
+    ).to(default_device())
     low_dim_embeddings = projection(high_dim_embeddings)
 
     spearman_loss = compute_spearman_loss(
@@ -506,6 +352,8 @@ def evaluate_mteb(
     overwrite_cache: bool = False
 ):
     """Evaluates a SentenceTransformer model on MTEB benchmark."""
+    login_if_token_available()
+
     if not skip_sts:
         sts_score = evaluate_sts(
             model=model,

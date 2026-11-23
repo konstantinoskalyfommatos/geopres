@@ -1,40 +1,75 @@
 [project]
 name = "geopres"
 version = "0.1.0"
-description = "Embedding dimensionality reduction and evaluation."
+description = "Post-hoc dimensionality reduction of text embeddings that preserves pairwise geometry."
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = [
-    "accelerate",
-    "datasets",
-    "matplotlib",
+license = { file = "LICENSE" }
+authors = [{ name = "Konstantinos Kalyfommatos" }]
+keywords = [
+    "embeddings",
+    "dimensionality-reduction",
+    "sentence-transformers",
     "mteb",
-    "numpy",
-    "pandas",
-    "python-dotenv",
-    "pyyaml",
-    "safetensors",
-    "scikit-learn",
-    "scipy",
+    "linear-projection",
+]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+# Core = what the GeoPres library itself needs: torch, a sentence-transformers
+# backbone, and safetensors for the weights.
+dependencies = [
+    "numpy>=1.24",
+    "safetensors>=0.4",
     "sentence-transformers==5.3.0",
-    "statsmodels>=0.14.6",
-    "torch",
-    "torchsort",
-    "tqdm",
+    "torch>=2.0",
+    "tqdm>=4.60",
     "transformers==4.57.6",
 ]
 
 [project.optional-dependencies]
-flash-attn = [
-    "flash-attn>=2.5.0",
+# Everything needed to reproduce the paper: precalculate -> train -> evaluate -> tables.
+research = [
+    "accelerate",
+    "datasets",
+    "huggingface-hub",
+    "matplotlib",
+    "mteb==2.12.26",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "statsmodels>=0.14.6",
 ]
+# Only needed for the Spearman loss (--spearman). Separate extra because
+# torchsort has to be compiled against your CUDA toolchain.
+spearman = ["torchsort"]
+dev = ["pytest"]
+
+[project.scripts]
+geopres-precalculate = "geopres.precalculate_embeddings:main"
+geopres-train = "geopres.train_model:main"
+geopres-eval = "geopres.eval_model:main"
+geopres-eval-backbone = "geopres.eval_backbone:main"
+geopres-compare = "geopres.compare_results:main"
+
+[project.urls]
+Repository = "https://github.com/konstantinoskalyfommatos/geopres"
+Issues = "https://github.com/konstantinoskalyfommatos/geopres/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# This is research code run directly with `python` (scripts live in `geopres/`
-# and do bare imports like `from config import ...`), not an installable package.
-# Skip building/installing the project itself; `uv sync` only sets up the venv
-# and installs dependencies. Run scripts with PYTHONPATH=geopres.
-[tool.uv]
-package = false
+[tool.hatch.build.targets.wheel]
+# Only the library + pipeline is shipped; analysis/ (tables, plots) is not.
+packages = ["geopres"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

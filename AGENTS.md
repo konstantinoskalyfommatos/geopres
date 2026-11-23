@@ -1,91 +1,115 @@
 # AGENTS.md — GeoPres
 
-GeoPres trains a linear projection that compresses high-dimensional sentence embeddings while preserving pairwise Euclidean and cosine distances, then evaluates the projection on the MTEB benchmark. Single-author thesis research code — no test suite, no CI.
+GeoPres trains a linear projection that compresses high-dimensional sentence
+embeddings while preserving pairwise Euclidean distances, then evaluates it on
+MTEB against PCA / random projection / random selection / truncation /
+autoencoder baselines. Single-author thesis research code.
+
+The repository is both an installable package (`geopres/`) and the paper's
+experiment pipeline.
 
 ## Quick start
 
 ```bash
-uv sync
-cp .env.example .env   # edit paths to absolute values; PROJECT_ROOT is required
-export PYTHONPATH="$(pwd)/geopres:$PYTHONPATH"
+uv sync --extra research        # package + paper dependencies
+uv run pytest                   # fast, CPU-only, no network
 ```
 
-All scripts live in `geopres/` (not `src/`). They do bare imports (`from config import …`), so `PYTHONPATH` must include `geopres/`. There is no `__init__.py` — `geopres/` is a directory on `sys.path`, not a package. `pyproject.toml` sets `[tool.uv] package = false`.
+All artefacts go to `<repository>/storage`; the paths are defined in
+`geopres/config.py`. There is no `.env` file to copy and no `PYTHONPATH` setup any
+more.
+
+## Layout
+
+- `geopres/api.py` — public API (`GeoPres.fit` / `.embed` / `.save` /
+  `GeoPres.load_path` / `.push_to_hub` / `GeoPres.from_pretrained`, plus
+  `Projection`, the backbone-free matrix). Keep it free
+  of `mteb`, `datasets`, `torchsort` and `huggingface_hub` module-level imports:
+  `import geopres` must stay light and work with core dependencies only.
+- `geopres/projection.py` — the linear map `W`, a bias-free `nn.Linear`, so
+  existing `best_model.pt` files load unchanged.
+- `geopres/losses.py` — positional / angular / Spearman losses and
+  `geopres_loss`, the single place where the loss is combined. `torchsort` is
+  imported lazily inside the Spearman functions.
+- `geopres/encode.py` — backbone loading and text encoding;
+  `sentence_transformers` is imported lazily.
+- `geopres/geopres_trainer.py` — Hugging Face `Trainer` used by the paper
+  pipeline (checkpoints, early stopping).
+- `geopres/train_model.py`, `precalculate_embeddings.py`, `eval_model.py`,
+  `eval_backbone.py` — CLI entry points (`geopres-train`,
+  `geopres-precalculate`, `geopres-eval`, `geopres-eval-backbone`). Each exposes
+  `main()` and also runs with `python -m`.
+- `geopres/compare_results.py` — merges the MTEB caches into
+  `comparison_results.csv` (entry point `geopres-compare`).
+- `geopres/baselines/` — the baseline methods.
+- `analysis/` — paper tables, plots and bootstrap tests. Not part of the
+  package, needs the cached results in `storage/`.
+
+## Imports
+
+Always use absolute package imports (`from geopres.config import ...`). Never
+rely on `PYTHONPATH` or bare imports (`from config import ...`).
 
 ## Workflow: precalculate → train → evaluate
 
-Training reads pre-computed embeddings from disk; it will not encode text on its own.
-
-1. **Precalculate embeddings** (one-time per backbone; slow, GPU-heavy):
-   ```bash
-   python geopres/precalculate_embeddings.py --model_name <hf-id> --train --val_test \
-       --batch_size 8192 --max_train_examples 10000000
-   ```
-   Writes to `$STORAGE_PATH/precalculated_embeddings/{c4|sentence-paraphrases}/<backbone>/{train,validation,test}_embeddings.pt`. Streams C4, chunks every `--encode_every` (default 100k), saves intermediates, then concatenates and deletes them.
-
-2. **Train the projection**:
-   ```bash
-   python geopres/train_model.py \
-       --backbone_model jinaai/jina-embeddings-v2-small-en \
-       --source_dim 512 --target_dim 32 \
-       --train_batch_size 20000 --val_batch_size 20000 \
-       --positional_loss_factor 1 --weighted_loss
-   ```
-   Defaults: AdamW lr=1e-2, weight_decay=0.1, 10 epochs, early stopping patience 3, linear schedule with 0.1 warmup. `--spearman` swaps positional+angular loss for differentiable Spearman loss. `--positional_loss_factor < 1` blends angular loss in. `--resume_from_checkpoint` resumes from the highest numbered `checkpoint-N` in the output dir.
-
-3. **Baselines** (autoencoder, PCA, random projection, random selection, truncation) use the same precalculated embeddings:
-   ```bash
-   python geopres/baselines/train_autoencoder.py --backbone_model … --source_dim … --target_dim …
-   python geopres/baselines/fit_pca.py …
-   python geopres/baselines/eval_*.py …
-   ```
-
-4. **Collect results** into one CSV:
-   ```bash
-   python geopres/scripts/compare_evaluation_results.py
-   ```
-   The only essential script under `geopres/scripts/`. Others are exploratory LaTeX-table / plotting generators.
+1. **Precalculate embeddings** (one time per backbone; GPU-heavy):
+   `geopres-precalculate --model_name <hf-id> --train --val_test --batch_size 8192`.
+   Writes `$STORAGE_PATH/precalculated_embeddings/{c4|sentence-paraphrases}/<backbone>/{train,validation,test}_embeddings.pt`.
+   Encodes in chunks every `--encode_every` (default 100k), skips existing
+   chunks, then concatenates and deletes them.
+2. **Train**:
+   `geopres-train --backbone_model ... --source_dim 512 --target_dim 32 --train_batch_size 20000 --val_batch_size 20000 --positional_loss_factor 1 --weighted_loss`.
+   Defaults: AdamW lr=1e-2, weight decay 0.1, 10 epochs, early stopping
+   patience 3, linear schedule with 0.1 warmup. `--spearman` swaps in the
+   Spearman loss, `--positional_loss_factor < 1` mixes in the angular loss,
+   `--resume_from_checkpoint` resumes from the highest `checkpoint-N`.
+3. **Evaluate**: `geopres-eval` (trained projection) or `geopres-eval-backbone`
+   (raw backbone). Both run MTEB through `eval_utils.evaluate_mteb`, which
+   caches under `$EVALUATION_RESULTS_PATH`.
+4. **Collect**: `geopres-compare` writes `comparison_results.csv` into
+   `$EVALUATION_RESULTS_PATH`. The scripts in `analysis/` turn that into the
+   paper's tables and figures.
 
 ## Pinned / fragile dependencies
 
-- `transformers==4.57.6` — upgrading breaks `Alibaba-NLP/gte-multilingual-base` (mGTE) at encode time. Do not bump without retesting.
-- `torchsort` — builds from source, needs CUDA toolchain. If `uv sync` fails, install a pre-built wheel from [teddykoker/torchsort releases](https://github.com/teddykoker/torchsort/releases) (see `README.md` → "Common Issues").
-- `sentence-transformers==5.3.0`, `mteb`, `safetensors`, `flash-attn>=2.5.0` (optional) are other notable pins.
+- `transformers==4.57.6` — upgrading breaks
+  `Alibaba-NLP/gte-multilingual-base` (mGTE) at encode time. Do not bump
+  without retesting.
+- `sentence-transformers==5.3.0` — the version behind every paper number.
+- `mteb==2.12.26` — the version behind the result caches.
+  `eval_utils.evaluate_sts` is tested against it; re-run the evaluation if you
+  bump it.
+- `torchsort` is an optional extra (`--extra spearman`). It builds from source
+  and needs a CUDA toolchain; pre-built wheels are linked from `README.md`
+  ("Common issues").
 
-## Environment (`.env`)
+## Devices
 
-`geopres/config.py` calls `load_dotenv(override=True)` and raises immediately if `PROJECT_ROOT` is missing. `HF_TOKEN` is used by `eval_utils.evaluate_mteb` for gated datasets. Other vars (`STORAGE_PATH`, `EVALUATION_RESULTS_PATH`, `TRAINED_MODELS_PATH`, `TRAINED_AUTOENCODERS_PATH`) default under `$PROJECT_ROOT/storage/` but are usually overridden in `.env`.
+`config.default_device()` returns `cuda` when a GPU is visible, otherwise
+`cpu`. Scripts log a warning instead of failing on CPU; the paper configuration
+still needs a GPU. The library API works on CPU.
 
-## Storage layout
+## Tests
 
-All artefacts under `$STORAGE_PATH` (default `$PROJECT_ROOT/storage`):
-
-- `precalculated_embeddings/{c4,sentence-paraphrases}/<backbone>/{train,validation,test}_embeddings.pt`
-- `trained_models/<backbone>/<model_name>/checkpoint-N/`
-- `trained_autoencoders/<backbone>/<model_name>/checkpoint-N/`
-- `evaluation_results/{trained_models,autoencoders}/<backbone>/<model_name>/results/<task>/…`
-
-Model names embed backbone, target dim, batch size, and method suffix — e.g. `jinaai__jina-embeddings-v2-small-en_reduced_32_batch_20000_poslossfactor_1`. Adding a new suffix requires updating `_get_extrinsic_model_names` in `geopres/scripts/calculate_intrinsic_correlations.py` and likely `generate_extrinsic_tables_raw_mteb.py`.
-
-## CUDA / hardware assumptions
-
-`train_model.py`, `train_autoencoder.py`, `precalculate_embeddings.py`, `eval_backbone.py` all hardcode `device="cuda"`. No CPU fallback. Default training batch is 20 000 embeddings per step. MTEB retrieval uses `retrieval_batch_size=6` (higher values OOM).
-
-## MTEB evaluation
-
-`evaluate_mteb` in `geopres/eval_utils.py` runs four groups (STS, classification, clustering, retrieval) with `cache=ResultCache`. By default skips cached tasks (`overwrite_strategy="only-missing"`); pass `--overwrite_cache` to force reruns. Intrinsic metrics (angular / positional / Spearman loss) are written alongside MTEB results as `intrinsic.json`.
+`tests/` holds small pytest tests for the API, the save/load round trip, the
+Hub helpers and the losses. They must stay CPU-only, network-free and fast: no
+model downloads, no MTEB runs, no real `push_to_hub` (mock
+`huggingface_hub.snapshot_download` instead).
 
 ## Conventions
 
-- `torch.manual_seed(42)` at module top of `eval_utils.py` and `geopres_trainer.py`.
-- `TOKENIZERS_PARALLELISM=false` set in `train_model.py` / `train_autoencoder.py`.
-- `HF_HUB_DOWNLOAD_TIMEOUT=300` set in `precalculate_embeddings.py`.
-- Long jobs run detached (`nohup.out` and `trainer_output/` are gitignored).
+- `torch.manual_seed(42)` at module top of `eval_utils.py` and
+  `geopres_trainer.py`.
+- `TOKENIZERS_PARALLELISM=false` in the training and precalculate scripts.
+- `HF_HUB_DOWNLOAD_TIMEOUT=300` in `precalculate_embeddings.py`.
+- Model names contain the backbone, target dim, batch size and method suffix;
+  adding a suffix requires updating `_get_extrinsic_model_names` in
+  `analysis/calculate_intrinsic_correlations.py`.
 
 ## What not to do
 
-- Don't bump `transformers` or `sentence-transformers` without checking mGTE compatibility.
-- Don't add a `tests/` directory — there is no CI and no test suite.
-- Don't "fix" stale `pyproject.toml` entrypoints without confirming; scripts are run directly with `python`.
-- Don't `pip install` globally — everything goes through `uv`.
-- Don't assume CPU works — gate work on `torch.cuda.is_available()` or warn before launching training.
+- Do not bump `transformers` or `sentence-transformers` without checking mGTE.
+- Do not import `mteb`, `datasets` or `torchsort` at module level in library
+  modules (it breaks core-only installs).
+- Do not re-introduce `.env` / `python-dotenv` or hard-coded `cuda`.
+- Do not `pip install` globally — use `uv`.

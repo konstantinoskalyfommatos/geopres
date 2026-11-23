@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import numpy as np
 import os
-from config import EVALUATION_RESULTS_PATH, STORAGE_PATH
+from geopres.config import EVALUATION_RESULTS_PATH, STORAGE_PATH
 
 
 def extract_embedding_dim(model_name):
@@ -135,7 +135,6 @@ def create_multi_plot(df, output_dir, models_non_mrl, models_mrl):
             bar_width = 0.12
 
             # Build per-method values per ratio bucket
-            ratio_to_idx = {r: i for i, r in enumerate(unique_ratios)}
             method_values = {m: [0.0] * len(unique_ratios) for m in method_order}
 
             # Re-collect with proper bucketing
@@ -262,7 +261,7 @@ if __name__ == "__main__":
     print("Creating multi-plot")
 
     RESULTS_PATH = os.path.join(EVALUATION_RESULTS_PATH, "comparison_results.csv")
-    PLOTS_PATH = os.path.join(STORAGE_PATH, "/plots/")
+    PLOTS_PATH = os.path.join(STORAGE_PATH, "plots")
 
     os.makedirs(PLOTS_PATH, exist_ok=True)
 

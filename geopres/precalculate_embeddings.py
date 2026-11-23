@@ -1,63 +1,40 @@
-"""Script to precalculate embeddings for a dataset using a specified model.
+"""Pre-encode a corpus with a backbone and cache the embeddings on disk.
 
-Saves the embeddings to disk for later use.
+Training a projection reads these cached tensors, so this is a one-time,
+GPU-heavy step per backbone:
+
+    geopres-precalculate --model_name jinaai/jina-embeddings-v2-small-en --train --val_test
+
+Writes ``$STORAGE_PATH/precalculated_embeddings/<dataset>/<backbone>/<split>_embeddings.pt``.
 """
 
-from argparse import ArgumentParser
+import logging
 import os
+from argparse import ArgumentParser
+
 import torch
-from sentence_transformers import SentenceTransformer
 from datasets import load_dataset
 from tqdm import tqdm
-import logging
 
-from torch.utils.data import DataLoader, Dataset
-from config import STORAGE_PATH, parse_dtype
-
+from geopres.config import PRECALCULATED_EMBEDDINGS_PATH, default_device, parse_dtype
+from geopres.encode import encode_texts, load_backbone
 
 os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "300"  # 5 minutes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-class CustomDataset(Dataset):
-    def __init__(self, texts):
-        self.texts = texts
-
-    def __len__(self):
-        return len(self.texts)
-
-    def __getitem__(self, idx):
-        return self.texts[idx]
-    
-
-MODEL_TO_KWARGS = {
-    "Qwen/Qwen3-Embedding-0.6B": {
-        "prompt": None
-    }
-}
+TRAIN_DATASET = "allenai/c4"
+TRAIN_DATASET_CONFIG = "en"
+VAL_TEST_DATASET = "agentlans/sentence-paraphrases"
 
 
-def calculate_embeddings(
-    model: SentenceTransformer, 
-    dataloader: DataLoader,
-    **kwargs
-) -> torch.Tensor:
-    all_embeddings = []
-    with torch.inference_mode():
-        # for batch in tqdm(dataloader, desc="Calculating embeddings"):
-        for batch in dataloader:
-            embeddings = model.encode(
-                batch,
-                convert_to_tensor=True,
-                show_progress_bar=False,
-                batch_size=len(batch),
-                **kwargs
-            ).cpu()
-            all_embeddings.append(embeddings)
-            
-    return torch.cat(all_embeddings, dim=0)
+def _output_dir(dataset_path: str, model_name: str) -> str:
+    return os.path.join(
+        PRECALCULATED_EMBEDDINGS_PATH,
+        dataset_path.split("/")[-1],
+        model_name.replace("/", "__"),
+    )
 
 
 def precalculate_train_embeddings(
@@ -65,53 +42,42 @@ def precalculate_train_embeddings(
     dataset_path: str,
     batch_size: int,
     text_column: str,
-    dataset_name: str = None,
-    max_examples: int = 2500000,
-    encode_every: int = 1000000,
+    dataset_name: str | None = None,
+    max_examples: int = 2_500_000,
+    encode_every: int = 1_000_000,
     dtype: torch.dtype | None = None,
-):
-    """Precalculate embeddings for a dataset using a specified model.
+    device: str | None = None,
+) -> None:
+    """Encode the training corpus, saving intermediate chunks as it goes.
 
-    Saves the embeddings to disk for later use.
+    Chunks are written every ``encode_every`` examples so that a crashed or
+    interrupted run can resume: existing chunks are skipped, and they are
+    concatenated and deleted once all of them are on disk.
     """
     logger.info("Precalculating training embeddings")
 
-    output_base_path = os.path.join(
-        STORAGE_PATH, 
-        "precalculated_embeddings",
-        dataset_path.split("/")[-1],
-        model_name.replace("/", "__")
-    )
+    output_base_path = _output_dir(dataset_path, model_name)
 
-    model = SentenceTransformer(
-        model_name, 
-        trust_remote_code=True,
-        device="cuda"
-    )
-
-    if dtype is not None:
-        model = model.to(dtype=dtype)
-
+    model = load_backbone(model_name, device=device, dtype=dtype)
     model.max_seq_length = 300
 
     ds_iter = load_dataset(
-        dataset_path, 
-        dataset_name, 
-        split="train", 
-        streaming=True
+        dataset_path,
+        dataset_name,
+        split="train",
+        streaming=True,
     )
-    
+
     logger.info("Processing train dataset")
-    
+
     total_seen = 0
     examples = []
-    # for ex in tqdm(ds_iter, desc="Loading examples"):
     for ex in ds_iter:
         if total_seen > max_examples:
             break
 
         text = ex[text_column]
-        # Keep small ones without tokenizing to save time
+        # Use only useful enough passages
         if len(text.split()) < 200:
             continue
         examples.append(ex)
@@ -119,102 +85,71 @@ def precalculate_train_embeddings(
 
         if total_seen % encode_every == 0:
             split_output_path = os.path.join(
-                output_base_path, 
-                f"train_embeddings_{total_seen}.pt"
+                output_base_path, f"train_embeddings_{total_seen}.pt"
             )
 
             if os.path.exists(split_output_path):
                 logger.info(
-                    f"{split_output_path} already exists. "
-                    "Skipping encoding this batch"
+                    f"{split_output_path} already exists. Skipping encoding this batch"
                 )
                 examples = []
                 continue
 
             logger.info(f"Encoding train examples. Total seen: {total_seen}")
-            texts = [ex[text_column] for ex in examples]
-
-            dataset = CustomDataset(texts)
-            dataloader = DataLoader(
-                dataset,
-                batch_size=batch_size, 
-                pin_memory=True,
-            )
-
-            embeddings = calculate_embeddings(
-                model, 
-                dataloader, 
-                **MODEL_TO_KWARGS.get(model_name, {})
+            embeddings = encode_texts(
+                model,
+                [ex[text_column] for ex in examples],
+                batch_size=batch_size,
+                model_name=model_name,
             )
 
             os.makedirs(os.path.dirname(split_output_path), exist_ok=True)
             torch.save(embeddings, split_output_path)
-
             logger.info(f"Saved train embeddings to {split_output_path}")
 
             examples = []
-    
-    # Merge saved tensors
-    logger.info("Merging saved train embeddings")
-    all_embeddings = []
-    for i in range(encode_every, total_seen + 1, encode_every):
-        split_output_path = os.path.join(output_base_path, f"train_embeddings_{i}.pt")
-        embeddings = torch.load(split_output_path, weights_only=True)
-        all_embeddings.append(embeddings)
-    
-    all_embeddings = torch.cat(all_embeddings, dim=0)
-    final_output_path = os.path.join(output_base_path, "train_embeddings.pt")
-    torch.save(all_embeddings, final_output_path)
 
-    # Delete after succesful save
+    logger.info("Merging saved train embeddings")
+    all_embeddings = [
+        torch.load(os.path.join(output_base_path, f"train_embeddings_{i}.pt"), weights_only=True)
+        for i in range(encode_every, total_seen + 1, encode_every)
+    ]
+    all_embeddings = torch.cat(all_embeddings, dim=0)
+    torch.save(all_embeddings, os.path.join(output_base_path, "train_embeddings.pt"))
+
     logger.info("Deleting intermediate embeddings")
-    all_embeddings = []
     for i in range(encode_every, total_seen + 1, encode_every):
-        split_output_path = os.path.join(output_base_path, f"train_embeddings_{i}.pt")
-        os.remove(split_output_path)
+        os.remove(os.path.join(output_base_path, f"train_embeddings_{i}.pt"))
 
     logger.info("Finished precalculating train embeddings")
+
 
 def precalculate_val_test_embeddings(
     model_name: str,
     dataset_path: str,
     batch_size: int,
-    max_validation_examples: int = 10000,
-    max_test_examples: int = 10000,
+    max_validation_examples: int = 10_000,
+    max_test_examples: int = 10_000,
     dtype: torch.dtype | None = None,
-):
-    """Precalculate embeddings for a dataset using a specified model.
+    device: str | None = None,
+) -> None:
+    """Encode paraphrase pairs for validation and test.
 
-    Saves the embeddings to disk for later use.
+    The dataset has a single ``validation`` split, so the first
+    ``max_validation_examples`` pairs become the validation set and the next
+    ``max_test_examples`` pairs become the test set (they do not overlap).
     """
     logger.info("Precalculating validation and test embeddings")
-    output_base_path = os.path.join(
-        STORAGE_PATH,
-        "precalculated_embeddings",
-        dataset_path.split("/")[-1],
-        model_name.replace("/", "__")
-    )
 
-    model = SentenceTransformer(
-        model_name, 
-        trust_remote_code=True,
-        device="cuda"
-    )
+    output_base_path = _output_dir(dataset_path, model_name)
 
-    if dtype is not None:
-        model = model.to(dtype=dtype)
-
+    model = load_backbone(model_name, device=device, dtype=dtype)
     model.max_seq_length = 512
 
-    ds_iter = iter(
-        load_dataset(
-            dataset_path, 
-            split="validation",  # Only validation available 
-        )
-    )
+    ds_iter = iter(load_dataset(dataset_path, split="validation"))
+
     for split, max_examples in zip(
-        ["validation", "test"],
-        [max_validation_examples, max_test_examples]
+        ["validation", "test"], [max_validation_examples, max_test_examples]
     ):
         logger.info(f"Processing split: {split}")
 
@@ -223,7 +158,7 @@ def precalculate_val_test_embeddings(
         for ex in tqdm(ds_iter, desc="Loading examples"):
             text, paraphrase = ex["text"], ex["paraphrase"]
             # Keep small ones without tokenizing to save time
-            if len(text.split()) < 350 and len(paraphrase.split()) < 350: 
+            if len(text.split()) < 350 and len(paraphrase.split()) < 350:
                 examples += [text, paraphrase]
                 total_seen += 1
             if total_seen >= max_examples:
@@ -231,66 +166,77 @@ def precalculate_val_test_embeddings(
 
         logger.info(f"Filtered {split} dataset to {len(examples) / 2} paraphrase pairs")
 
-        dataset = CustomDataset(examples)
-        dataloader = DataLoader(dataset, batch_size=batch_size, pin_memory=True)
-
-        embeddings = calculate_embeddings(
-            model, 
-            dataloader, 
-            **MODEL_TO_KWARGS.get(model_name, {})
+        embeddings = encode_texts(
+            model, examples, batch_size=batch_size, model_name=model_name
         )
 
         split_output_path = os.path.join(output_base_path, f"{split}_embeddings.pt")
         os.makedirs(os.path.dirname(split_output_path), exist_ok=True)
         torch.save(embeddings, split_output_path)
-
         logger.info(f"Saved {split} embeddings to {split_output_path}")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = ArgumentParser(description="Precalculate embeddings for a dataset")
-    
+
     parser.add_argument("--model_name", type=str, default="jinaai/jina-embeddings-v2-small-en")
     parser.add_argument("--backbone_dtype", type=str, default=None, help="dtype for backbone model (e.g., float16, bfloat16)")
-    parser.add_argument("--train", action="store_true", help="Precalulate training embeddings")
-    parser.add_argument("--val_test", action="store_true", help="Precalulate validation and test embeddings")
+    parser.add_argument("--device", type=str, default=None, help="cuda / cpu (default: cuda if available)")
+    parser.add_argument("--train", action="store_true", help="Precalculate training embeddings")
+    parser.add_argument("--val_test", action="store_true", help="Precalculate validation and test embeddings")
     parser.add_argument("--batch_size", type=int, default=8192, help="1024 works well for 24GB GPU memory and Alibaba-NLP/gte-multilingual-base")
-    parser.add_argument("--max_train_examples", type=int, default=10000000, help="Maximum number of training examples to process")
-    parser.add_argument("--max_val_examples", type=int, default=10000, help="Maximum number of validation examples to process")
-    parser.add_argument("--max_test_examples", type=int, default=10000, help="Maximum number of test examples to process")
-    parser.add_argument("--encode_every", type=int, default=100000, help="Number of examples to encode before saving intermediate results")
+    parser.add_argument(
+        "--max_train_examples",
+        type=int,
+        default=10_000_000,
+        help=(
+            "Maximum number of training examples to process. The default is the paper's "
+            "10M: results kept improving with more data. A few hundred thousand examples "
+            "(e.g. 300000) are enough for a good projection and encode much faster."
+        ),
+    )
+    parser.add_argument("--max_val_examples", type=int, default=10_000, help="Maximum number of validation examples to process")
+    parser.add_argument("--max_test_examples", type=int, default=10_000, help="Maximum number of test examples to process")
+    parser.add_argument("--encode_every", type=int, default=100_000, help="Number of examples to encode before saving intermediate results")
 
     args = parser.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. This script requires a GPU."
+    if not args.train and not args.val_test:
+        parser.error("Provide at least one of --train or --val_test.")
+
+    device = args.device or default_device()
+    if device == "cpu":
+        logger.warning(
+            "Encoding 10M C4 passages on CPU is extremely slow. Use a GPU, or "
+            "lower --max_train_examples: a few hundred thousand examples are "
+            "enough for a good projection."
         )
 
-    dtype = None
-    if args.backbone_dtype:
-        dtype = parse_dtype(args.backbone_dtype)
-
-    if not args.train and not args.val_test:
-        raise ValueError("Provide at least one of --train or --val_test arguments.")
+    dtype = parse_dtype(args.backbone_dtype) if args.backbone_dtype else None
 
     if args.train:
         precalculate_train_embeddings(
             model_name=args.model_name,
-            dataset_path="allenai/c4",
-            dataset_name="en",
+            dataset_path=TRAIN_DATASET,
+            dataset_name=TRAIN_DATASET_CONFIG,
             batch_size=args.batch_size,
             text_column="text",
             max_examples=args.max_train_examples,
             encode_every=args.encode_every,
             dtype=dtype,
+            device=device,
         )
     if args.val_test:
         precalculate_val_test_embeddings(
             model_name=args.model_name,
-            dataset_path="agentlans/sentence-paraphrases",
+            dataset_path=VAL_TEST_DATASET,
             batch_size=args.batch_size,
             max_validation_examples=args.max_val_examples,
             max_test_examples=args.max_test_examples,
             dtype=dtype,
+            device=device,
         )
+
+
+if __name__ == "__main__":
+    main()

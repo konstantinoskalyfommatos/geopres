@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-from config import STORAGE_PATH
+from geopres.config import STORAGE_PATH
 
 
 df = pd.read_csv(
