@@ -1,5 +1,9 @@
 # GeoPres
 
+[![PyPI](https://img.shields.io/pypi/v/geopres)](https://pypi.org/project/geopres/)
+[![Python versions](https://img.shields.io/pypi/pyversions/geopres)](https://pypi.org/project/geopres/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/konstantinoskalyfommatos/geopres/blob/main/LICENSE)
+
 GeoPres compresses high-dimensional text embeddings with a **single linear map**
 that is trained to keep pairwise Euclidean distances. It is *post-hoc*: the
 embedding model stays frozen, and at inference time the whole "reduction" is one
@@ -23,6 +27,18 @@ This repository features three parts:
 
 Python 3.10 or newer is required (tested on 3.10, 3.11, 3.12 and 3.13).
 
+### Library (PyPI)
+
+`pip install geopres` installs the [library](https://pypi.org/project/geopres/) only:
+
+```bash
+pip install geopres                # library only: torch + sentence-transformers
+pip install "geopres[research]"    # + datasets, mteb, matplotlib, ... (paper pipeline)
+pip install "geopres[spearman]"    # + torchsort, only for the --spearman loss
+```
+
+### From source (development, paper pipeline)
+
 ```bash
 git clone https://github.com/konstantinoskalyfommatos/geopres
 cd geopres
@@ -32,24 +48,26 @@ uv sync --extra research                     # package + paper dependencies
 uv sync --extra research --extra spearman    # ... plus torchsort, for --spearman
 
 # or with plain pip
-pip install -e .                             # library only (torch + sentence-transformers)
-pip install -e ".[research]"                 # + datasets, mteb, matplotlib, ...
-pip install -e ".[spearman]"                 # + torchsort, only for the --spearman loss
+pip install -e ".[research]"
 ```
 
 `torchsort` is not installed by default because it has to be compiled against
 your CUDA toolchain; see [Common issues](#common-issues).
 
-> **PyPI.** `pip install geopres` installs the library only. Add `[research]`
-> or `[spearman]` for the paper pipeline: `pip install "geopres[research]"`.
-
 ---
 
 ## Quick start (PyPI library)
 
-Fitting a dimension-reduced embedding model:
+There are two ways to use `geopres`, depending on whether you want to train your
+own projection or use one that is already trained.
+
+### Fitting your own projection (`GeoPres`)
+
+`GeoPres` wraps a frozen embedding model plus a trainable linear map. Train,
+save, and reduce new text:
 
 ```python
+# pip install geopres
 from geopres import GeoPres
 
 model = GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32)
@@ -57,54 +75,48 @@ model.fit(texts)                       # texts: list[str]
 reduced = model.embed(texts)           # numpy array, shape (len(texts), 32)
 
 model.save("geopres-mpnet-32")
-``` 
-
-Note that `fit` also accepts embeddings you already have, which allows much cheaper training:
-
-```python
-import torch
-from geopres import GeoPres
-
-# mmap=True maps the file instead of reading it into RAM.
-embeddings = torch.load("my_embeddings.pt", mmap=True, weights_only=True)  # (n, 768)
-model = GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32)
-model.fit(embeddings)                                                      # no encoding, just the projection
-reduced = model.embed(embeddings)                                          # (n, 32)
 ```
 
-Encoding is the expensive part, and `fit` encodes your texts every time you call
-it. Encode once, then train as many projections as you like:
-
-```python
-import torch
-from geopres import GeoPres, encode_corpus
-
-encode_corpus(texts, "c4.pt", "sentence-transformers/all-mpnet-base-v2")
-
-embeddings = torch.load("c4.pt", weights_only=True)
-GeoPres(dim=32).fit(embeddings)
-GeoPres(dim=64).fit(embeddings)
-```
-
-Load a trained projection and use it on new text:
+Reload it later and use it on new text
 
 ```python
 from geopres import GeoPres
 
-model = GeoPres.load_path("geopres-mpnet-32")  # backbone id comes from config.json
+# Backbone + projection
+model = GeoPres.load_path("geopres-mpnet-32")  # the backbone id is saved in`config.json`
 reduced = model.embed(["a sentence I have never seen before"])
 ```
 
-The projection is a plain matrix, therefore it can be applied on embeddings
-created elsewhere (e.g. Hugging Face's
-[TEI](https://huggingface.co/docs/text-embeddings-inference)), as long as the
-underlying vector-generator function (e.g. embedding model) is the same during
-training and inference. "Same" includes the pooling, the normalisation and, for
-instruction-based models such as Qwen3-Embedding, the same query/passage
-prefixes.
+**Training on precumputed embeddings (recommended)** Encoding is the expensive part, and
+`fit` accepts embeddings you already have, which makes training much cheaper:
 
-`Projection` is the API for exactly that: the matrix and nothing else. No
-backbone is loaded, downloaded or needed.
+```python
+import torch
+from geopres import GeoPres, encode_coprus
+
+# Get training vectors
+encode_corpus(texts, "my_training_embeddings.pt", "sentence-transformers/all-mpnet-base-v2")
+
+# mmap=True maps the file instead of reading it into RAM (optional, slower)
+embeddings = torch.load("my_training_embeddings.pt", mmap=True, weights_only=True)  # (n, 768)
+
+# Reuse training embeddings for multiple .fit calls
+GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32).fit(embeddings)
+GeoPres("sentence-transformers/all-mpnet-base-v2", dim=64).fit(embeddings)
+```
+
+### Using an already-fitted projection (`Projection`)
+
+Every trained `GeoPres` model reduces to a single matrix. `Projection` is that
+matrix on its own: a `(dim, source_dim)` weight and nothing else. No backbone is
+loaded, downloaded or needed.
+
+This is the right tool when your embeddings come from somewhere else — Hugging
+Face's [TEI](https://huggingface.co/docs/text-embeddings-inference), a vector
+database, a batch job — as long as they were produced by the embedding model the
+projection was trained for. "Same model" means the same pooling, the same
+normalisation and, for instruction-based models such as Qwen3-Embedding, the
+same query/passage prefixes:
 
 ```python
 from geopres import Projection
@@ -122,7 +134,7 @@ reduced = projection.project(vectors)               # (1000, 32)
 ```
 
 If you would rather not depend on `geopres` at inference time, the matrix is
-just `projection.weight`, of shape `(dim, source_dim)`: one `vectors @ weight.T`.
+just `projection.weight`: one `vectors @ weight.T`.
 
 Trained projections released with the paper live under
 [huggingface.co/kkalyfo/geopres-projections](https://huggingface.co/collections/kkalyfo/geopres-projections).
