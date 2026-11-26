@@ -29,7 +29,7 @@ baselines) lives in the sibling modules and is driven by the CLI entry points
 (``geopres-train``, ``geopres-eval``, ``geopres-precalculate``).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 from geopres.api import GeoPres, Projection
 from geopres.encode import encode_corpus

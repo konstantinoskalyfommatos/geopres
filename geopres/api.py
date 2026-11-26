@@ -702,6 +702,10 @@ Backbone (frozen, not included): [{self.model_name}](https://huggingface.co/{sel
 
 Paper: [On Post-Hoc Dimensionality Reduction of Text Embeddings](https://openreview.net/forum?id=vAWo3CIzqp) (EACL 2027)
 
+- Code: [github.com/konstantinoskalyfommatos/geopres](https://github.com/konstantinoskalyfommatos/geopres)
+- Package: [pypi.org/project/geopres](https://pypi.org/project/geopres/)
+- Install: `pip install geopres`
+
 ## Encode text and reduce it
 
 ```python

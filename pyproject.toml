@@ -1,6 +1,6 @@
 [project]
 name = "geopres"
-version = "0.1.1"
+version = "0.1.2"
 description = "Post-hoc dimensionality reduction of text embeddings that preserves pairwise geometry."
 readme = "README.md"
 # Floor set by sentence-transformers 5.3.0, which needs >=3.10. No upper bound:
@@ -67,6 +67,7 @@ geopres-compare = "geopres.compare_results:main"
 [project.urls]
 Repository = "https://github.com/konstantinoskalyfommatos/geopres"
 Issues = "https://github.com/konstantinoskalyfommatos/geopres/issues"
+PyPI = "https://pypi.org/project/geopres/"
 
 [build-system]
 requires = ["hatchling"]
