@@ -237,8 +237,15 @@ class GeoPres:
             raise ValueError("No data given.")
 
         if isinstance(items[0], str):
+            backbone = self.backbone  # raises early if there is no model
+            logger.info(
+                f"Encoding {len(items)} texts with {self.model_name or 'the backbone'}. "
+                "This runs the model over every text, so it can take a while; "
+                "pass pre-computed embeddings to skip this step (they can be re-used for" \
+                "a future .fit call as well)."
+            )
             return encode_texts(
-                self.backbone,
+                backbone,
                 items,
                 batch_size=batch_size,
                 model_name=self.model_name,
@@ -257,12 +264,7 @@ class GeoPres:
         learning_rate: float = 1e-2,
         weight_decay: float = 0.1,
         warmup_ratio: float = 0.1,
-        positional_loss_factor: float = 1.0,
-        weighted_loss: bool = False,
-        spearman: bool = False,
-        spearman_local_or_global: str = "local",
         validation_data: Sequence | np.ndarray | torch.Tensor | None = None,
-        validation_fraction: float = 0.05,
         patience: int = 3,
         encode_batch_size: int = 32,
         seed: int = 42,
@@ -283,22 +285,29 @@ class GeoPres:
                 changes the training signal.
             learning_rate, weight_decay, warmup_ratio: optimizer settings
                 (paper: 1e-2, 0.1, 0.1).
-            positional_loss_factor: 1.0 = Euclidean distance loss only (paper
-                default). Below 1.0 mixes in the cosine similarity loss.
-            weighted_loss: weight pairs by inverse distance (close pairs count
-                more).
-            spearman: use the differentiable Spearman loss instead (needs
-                ``torchsort``).
-            validation_data: embeddings used for early stopping. If omitted, a
-                ``validation_fraction`` slice of ``data`` is held out.
+            validation_data: embeddings used to pick the best checkpoint and to
+                stop early. If None, training runs all ``epochs`` and keeps the last weights.
             patience: stop after this many epochs without validation
                 improvement. Ignored when there is no validation data.
-            encode_batch_size: batch size used when encoding texts.
+            encode_batch_size: batch size used only when ``data`` /
+                ``validation_data`` are texts that need encoding. Ignored when
+                you pass embeddings, as they are already encoded.
             seed: random seed.
             verbose: log one line per epoch.
 
         Returns:
             ``self``, so calls can be chained.
+
+        # Note:
+            For RAM-restricted machines: the data does not have to fit in RAM. 
+            Memory-map the file and ``fit`` reads only the batches it needs::
+
+                embeddings = torch.load("train.pt", mmap=True, weights_only=True)
+                model = GeoPres("all-mpnet-base-v2", dim=32)
+                model.fit(embeddings)
+
+            To encode a corpus only once and train several projections on it,
+            use :func:`geopres.encode_corpus`.
         """
         if verbose:
             _ensure_logging()
@@ -325,15 +334,20 @@ class GeoPres:
         if train.ndim != 2:
             raise ValueError(f"Expected a 2-D array of embeddings, got shape {tuple(train.shape)}")
 
-        # Hold out a small slice for early stopping if no validation set is given.
-        if validation is None and validation_fraction > 0 and len(train) >= 20:
-            n_validation = max(2, int(len(train) * validation_fraction))
-            train, validation = train[:-n_validation], train[-n_validation:]
-
         if len(train) < 2:
             raise ValueError(f"Need at least 2 embeddings to train on, got {len(train)}")
         if validation is not None and len(validation) < 2:
+            logger.warning(
+                f"validation_data has {len(validation)} embedding(s), need at least 2. "
+                "Ignoring it and keeping the last checkpoint."
+            )
             validation = None
+        if validation is None:
+            logger.warning(
+                "No validation_data given: training keeps the LAST checkpoint and "
+                "never stops early. Pass validation_data=... to keep the weights "
+                "with the lowest validation loss instead."
+            )
 
         batch_size = min(batch_size, len(train))
 
@@ -349,13 +363,6 @@ class GeoPres:
         warmup_steps = int(total_steps * warmup_ratio)
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lambda step: _linear_warmup_decay(step, warmup_steps, total_steps)
-        )
-
-        loss_kwargs = dict(
-            positional_loss_factor=positional_loss_factor,
-            weighted=weighted_loss,
-            spearman=spearman,
-            spearman_local_or_global=spearman_local_or_global,
         )
 
         best_loss = float("inf")
@@ -375,7 +382,6 @@ class GeoPres:
                     low_dim_embeddings=self._projection(batch),
                     high_dim_embeddings=batch,
                     training=True,
-                    **loss_kwargs,
                 )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -388,7 +394,7 @@ class GeoPres:
 
             train_loss = epoch_loss / max(num_batches, 1)
             validation_loss = (
-                self._validation_loss(validation, batch_size, **loss_kwargs)
+                self._validation_loss(validation, batch_size)
                 if validation is not None
                 else None
             )
@@ -428,17 +434,18 @@ class GeoPres:
             "learning_rate": learning_rate,
             "weight_decay": weight_decay,
             "warmup_ratio": warmup_ratio,
-            "positional_loss_factor": positional_loss_factor,
-            "weighted_loss": weighted_loss,
-            "spearman": spearman,
+            "positional_loss_factor": 1.0,
+            "weighted_loss": False,
+            "spearman": False,
             "seed": seed,
             "num_train_embeddings": int(len(train)),
+            "checkpoint_selection": "best_validation" if best_state is not None else "last",
             "best_validation_loss": best_loss if best_state is not None else None,
         }
         return self
 
     @torch.no_grad()
-    def _validation_loss(self, embeddings: torch.Tensor, batch_size: int, **loss_kwargs) -> float:
+    def _validation_loss(self, embeddings: torch.Tensor, batch_size: int) -> float:
         self._projection.eval()
         total_loss = 0.0
         total_items = 0
@@ -450,7 +457,6 @@ class GeoPres:
                 low_dim_embeddings=self._projection(chunk),
                 high_dim_embeddings=chunk,
                 training=False,
-                **loss_kwargs,
             )
             total_loss += loss.item() * len(chunk)
             total_items += len(chunk)

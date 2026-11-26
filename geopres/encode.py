@@ -1,7 +1,8 @@
 """Encoding text with a backbone model, shared by the API and the scripts."""
 
 import logging
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Sequence
 
 import torch
 
@@ -75,4 +76,107 @@ def encode_texts(
     return torch.cat(chunks, dim=0)
 
 
-__all__ = ["MODEL_TO_ENCODE_KWARGS", "load_backbone", "encode_texts"]
+def encode_corpus(
+    texts: Sequence[str],
+    path: str,
+    model: "str | SentenceTransformer | None" = None,
+    *,
+    batch_size: int = 8192,
+    chunk_size: int = 100_000,
+    dtype: torch.dtype | None = None,
+    device: str | None = None,
+    overwrite: bool = False,
+    show_progress_bar: bool = False,
+) -> str:
+    """Encode a corpus once and save it as one float32 tensor.
+
+    Encoding is the expensive step, so do it once and train several projections
+    on the result::
+
+        encode_corpus(texts, "c4.pt", "sentence-transformers/all-mpnet-base-v2")
+        model.fit(torch.load("c4.pt", mmap=True, weights_only=True))
+
+    The corpus is encoded in ``chunk_size`` slices, each saved to
+    ``<path>.part-NNNNN``. An existing part is not encoded again, so an
+    interrupted run resumes where it stopped. The parts are concatenated into
+    ``path`` at the end and then deleted.
+
+    Args:
+        texts: the texts to encode.
+        path: output file, e.g. ``"c4.pt"``.
+        model: a sentence-transformers id or an already loaded model.
+        batch_size: texts per forward pass.
+        chunk_size: texts per saved part (the resume granularity).
+        dtype, device: where and in what precision to run the backbone.
+        overwrite: re-encode even if ``path`` already exists.
+        show_progress_bar: show a tqdm bar while encoding.
+
+    Returns:
+        ``path``, so it can be passed straight to ``torch.load``.
+    """
+    if isinstance(texts, (str, bytes)):
+        raise TypeError("Expected a list of texts, got a single string.")
+    texts = list(texts)
+    if not texts:
+        raise ValueError("No texts to encode.")
+    if model is None:
+        raise ValueError(
+            "Pass model=<sentence-transformers id or loaded model> to encode_corpus."
+        )
+    if os.path.exists(path) and not overwrite:
+        logger.info(f"{path} already exists, reusing it (pass overwrite=True to re-encode).")
+        return path
+
+    model_name = model if isinstance(model, str) else None
+    backbone = load_backbone(model, device=device, dtype=dtype) if model_name else model
+
+    total = len(texts)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    logger.info(
+        f"Encoding {total} texts with {model_name or 'the given backbone'} into "
+        f"{path}. This runs the model over every text and can take a while."
+    )
+
+    parts = []
+    for index, start in enumerate(range(0, total, chunk_size)):
+        part = f"{path}.part-{index:05d}"
+        parts.append(part)
+        if os.path.exists(part):
+            logger.info(f"{part} already exists, skipping it")
+            continue
+        chunk = texts[start : start + chunk_size]
+        torch.save(
+            encode_texts(
+                backbone,
+                chunk,
+                batch_size=batch_size,
+                model_name=model_name,
+                show_progress_bar=show_progress_bar,
+            ),
+            part,
+        )
+        logger.info(f"Saved {len(chunk)} embeddings to {part}")
+
+    # Fill one preallocated tensor, so peak memory is the result plus one part.
+    merged, offset = None, 0
+    for part in parts:
+        piece = torch.load(part, mmap=True, weights_only=True)
+        if merged is None:
+            merged = torch.empty((total, piece.shape[1]), dtype=torch.float32)
+        merged[offset : offset + len(piece)] = piece
+        offset += len(piece)
+        del piece
+    if offset != total:
+        raise ValueError(
+            f"The saved parts in {path}.part-* hold {offset} embeddings, expected "
+            f"{total}. Delete them or pass overwrite=True."
+        )
+
+    torch.save(merged, path)
+    for part in parts:
+        os.remove(part)
+    logger.info(f"Saved {tuple(merged.shape)} embeddings to {path}")
+    return path
+
+
+__all__ = ["MODEL_TO_ENCODE_KWARGS", "encode_corpus", "encode_texts", "load_backbone"]

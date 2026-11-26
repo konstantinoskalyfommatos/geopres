@@ -45,7 +45,7 @@ your CUDA toolchain; see [Common issues](#common-issues).
 
 ---
 
-## Quick start (library)
+## Quick start (PyPI library)
 
 Fitting a dimension-reduced embedding model:
 
@@ -65,10 +65,25 @@ Note that `fit` also accepts embeddings you already have, which allows much chea
 import torch
 from geopres import GeoPres
 
-embeddings = torch.load("my_embeddings.pt")        # (n, 768)
+# mmap=True maps the file instead of reading it into RAM.
+embeddings = torch.load("my_embeddings.pt", mmap=True, weights_only=True)  # (n, 768)
 model = GeoPres("sentence-transformers/all-mpnet-base-v2", dim=32)
-model.fit(embeddings)                              # no encoding, just the projection
-reduced = model.embed(embeddings)                  # (n, 32)
+model.fit(embeddings)                                                      # no encoding, just the projection
+reduced = model.embed(embeddings)                                          # (n, 32)
+```
+
+Encoding is the expensive part, and `fit` encodes your texts every time you call
+it. Encode once, then train as many projections as you like:
+
+```python
+import torch
+from geopres import GeoPres, encode_corpus
+
+encode_corpus(texts, "c4.pt", "sentence-transformers/all-mpnet-base-v2")
+
+embeddings = torch.load("c4.pt", weights_only=True)
+GeoPres(dim=32).fit(embeddings)
+GeoPres(dim=64).fit(embeddings)
 ```
 
 Load a trained projection and use it on new text:
@@ -76,7 +91,7 @@ Load a trained projection and use it on new text:
 ```python
 from geopres import GeoPres
 
-model = GeoPres.load_path("geopres-mpnet-32")       # backbone id comes from config.json
+model = GeoPres.load_path("geopres-mpnet-32")  # backbone id comes from config.json
 reduced = model.embed(["a sentence I have never seen before"])
 ```
 
@@ -108,34 +123,9 @@ reduced = projection.project(vectors)               # (1000, 32)
 
 If you would rather not depend on `geopres` at inference time, the matrix is
 just `projection.weight`, of shape `(dim, source_dim)`: one `vectors @ weight.T`.
-It is read-only, so a trained projection cannot be changed by accident.
-
-Numpy in, numpy out; a tensor in, a tensor out on the same device and dtype.
-Vectors that already live on a GPU are therefore never copied to the host:
-
-```python
-vectors = torch.load("gpu_embeddings.pt").cuda()     # stays on the GPU
-reduced = projection.project(vectors)                # torch.Tensor, cuda
-
-projection.to_torch(device="cuda")                   # frozen nn.Linear, e.g. for torch.compile / ONNX
-```
-
-The projection is one `768 x 32` matrix, so it is memory-bound: on CPU it costs
-about the same as the copy it would take to move the vectors to a GPU. Keep it
-on whichever device already holds the vectors.
-
-Upload your own projection, or load one from the Hub:
-
-```python
-model.push_to_hub("kkalyfo/geopres-mpnet-32")     # config + weights + model card
-
-from geopres import GeoPres
-model = GeoPres.from_pretrained("kkalyfo/geopres-mpnet-32")
-reduced = model.embed(["a sentence I have never seen before"])
-```
 
 Trained projections released with the paper live under
-[huggingface.co/kkalyfo](https://huggingface.co/kkalyfo).
+[huggingface.co/kkalyfo/geopres-projections](https://huggingface.co/collections/kkalyfo/geopres-projections).
 
 ### API summary
 
@@ -143,6 +133,7 @@ Trained projections released with the paper live under
 | --- | --- |
 | `GeoPres(model, dim=32)` | `model` is a sentence-transformers id, a loaded `SentenceTransformer`, or `None` (embeddings only). |
 | `.fit(data, ...)` | Train on texts or on an `(n, source_dim)` array/tensor. Returns `self`. |
+| `encode_corpus(texts, path, model)` | Encode a corpus once and save it as one float32 tensor, so `fit` can be re-run without re-encoding. |
 | `.embed(data, ...)` | Project texts or embeddings to `dim`. Returns `(n, dim)` numpy by default, `(dim,)` for a single vector. |
 | `.save(path)` | Writes `config.json` + `projection.safetensors`. |
 | `GeoPres.load_path(path)` | Reloads a saved directory (or a bare `.pt` / `.safetensors` weight file). |
