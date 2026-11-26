@@ -35,6 +35,8 @@ def test_model_card_mentions_backbone_and_dim(fitted_model):
     assert "Projection.from_pretrained(\"kkalyfo/geopres-test\")" in card
     assert "https://huggingface.co/sentence-transformers/all-mpnet-base-v2" in card
     assert "https://openreview.net/forum?id=vAWo3CIzqp" in card
+    assert "https://github.com/konstantinoskalyfommatos/geopres" in card
+    assert "https://pypi.org/project/geopres/" in card
 
 
 def test_from_pretrained_loads_the_downloaded_folder(fitted_model, tmp_path, monkeypatch):

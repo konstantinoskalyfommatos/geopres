@@ -31,7 +31,8 @@ more.
 - `geopres/losses.py` — positional / angular / Spearman losses and
   `geopres_loss`, the single place where the loss is combined. `torchsort` is
   imported lazily inside the Spearman functions.
-- `geopres/encode.py` — backbone loading and text encoding;
+- `geopres/encode.py` — backbone loading, text encoding and `encode_corpus`
+  (encode a corpus once, chunked and resumable, for reuse across `fit` calls);
   `sentence_transformers` is imported lazily.
 - `geopres/geopres_trainer.py` — Hugging Face `Trainer` used by the paper
   pipeline (checkpoints, early stopping).

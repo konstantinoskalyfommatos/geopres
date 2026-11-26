@@ -29,9 +29,10 @@ baselines) lives in the sibling modules and is driven by the CLI entry points
 (``geopres-train``, ``geopres-eval``, ``geopres-precalculate``).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 from geopres.api import GeoPres, Projection
+from geopres.encode import encode_corpus
 from geopres.losses import (
     compute_angular_loss,
     compute_positional_loss,
@@ -47,6 +48,7 @@ __all__ = [
     "compute_angular_loss",
     "compute_positional_loss",
     "compute_spearman_loss",
+    "encode_corpus",
     "geopres_loss",
     "__version__",
 ]
