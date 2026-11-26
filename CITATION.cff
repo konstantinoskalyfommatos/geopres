@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite the paper below."
 title: "GeoPres"
 type: software
-version: 0.1.2
+version: 0.1.3
 license: MIT
 repository-code: "https://github.com/konstantinoskalyfommatos/geopres"
 abstract: >-
